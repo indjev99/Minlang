@@ -88,6 +88,7 @@ enum TokenType
     Operator,
     Assign,
     Semicol,
+    Comma,
     LBrack,
     RBrack,
     If,
@@ -104,6 +105,7 @@ enum TokenType
 const std::unordered_map<std::string, TokenType> tokenMap = {
     {"=", Assign},
     {";", Semicol},
+    {",", Comma},
     {"(", LBrack},
     {")", RBrack},
     {"if", If},
@@ -120,6 +122,7 @@ const std::unordered_map<std::string, TokenType> tokenMap = {
 const std::unordered_map<TokenType, std::string> tokenStrings = {
     {Assign, "="},
     {Semicol, ";"},
+    {Comma, ","},
     {LBrack, "("},
     {RBrack, ")"},
     {If, "if"},
@@ -206,6 +209,20 @@ struct TokenStream
     }
 };
 
+void lexOperators(TokenStream& tokenStream, const std::string& str, int line)
+{
+    size_t prefLen;
+    for (prefLen = str.size(); prefLen >= 1; --prefLen)
+    {
+        if (operationMap.find(str.substr(0, prefLen)) != operationMap.end()) break;
+    }
+
+    errorAssert(prefLen > 0, "Lex", "Invalid operator", line);
+
+    tokenStream.tokens.emplace_back(str.substr(0, prefLen), line);
+    lexOperators(tokenStream, str.substr(prefLen, str.size() - prefLen), line);
+}
+
 TokenStream lexProgram(std::istream& in)
 {
     enum SymbolSet
@@ -214,7 +231,6 @@ TokenStream lexProgram(std::istream& in)
         WORD,
         NUMBER,
         OPERATOR,
-        SINGLE,
         SPACE,
     };
 
@@ -230,7 +246,6 @@ TokenStream lexProgram(std::istream& in)
 
         SymbolSet cSet;
         if (isspace(c)) cSet = SPACE;
-        else if (c == '(' || c == ')' || c == ';') cSet = SINGLE; 
         else if (c == '_' || isalpha(c)) cSet = WORD; 
         else if (isdigit(c)) cSet = currSymbSet == WORD ? WORD : NUMBER;
         else cSet = OPERATOR;
@@ -244,11 +259,7 @@ TokenStream lexProgram(std::istream& in)
             currSymbSet = ANY;
         }
 
-        if (cSet == SINGLE)
-        {
-            tokenStream.tokens.emplace_back(std::string(1, c), line);
-        }
-        else if (cSet != SPACE)
+        if (cSet != SPACE)
         {
             curr += c;
             currSymbSet = cSet;
@@ -323,7 +334,15 @@ struct ASTNode
 
 ASTNode parseProgram(const TokenStream& tokenStream)
 {
-    bool defInProgress = false;
+    enum DefState
+    {
+        ExpectDefName,
+        ExpectDefBrack,
+        ExepctDefParam,
+        ExepctDefSep
+    };
+
+    DefState = false;
     std::vector<ASTNode> nodeStack;
 
     for (size_t i = 0; i < tokenStream.tokens.size(); ++i)

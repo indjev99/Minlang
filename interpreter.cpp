@@ -88,8 +88,8 @@ const std::unordered_map<Operator, std::string> operatorStrings = {
 };
 
 const std::unordered_map<Operator, int> operatorPrec = {
-    {UnPlus, 0},
-    {UnMinus, 0},
+    {UnPlus, 20},
+    {UnMinus, 20},
     {ArAdd, 9},
     {ArSub, 9},
     {ArMul, 10},
@@ -103,11 +103,11 @@ const std::unordered_map<Operator, int> operatorPrec = {
     {CmpGeq, 7},
     {LogAnd, 2},
     {LogOr, 1},
-    {LogNot, 0},
+    {LogNot, 20},
     {BitAnd, 5},
     {BitOr, 3},
     {BitXor, 4},
-    {BitNot, 0},
+    {BitNot, 20},
     {BitLShift, 8},
     {BitRShift, 8}
 };
@@ -134,8 +134,8 @@ const std::unordered_set<Operator> binOperators = {
 };
 
 const std::unordered_map<Operator, Operator> unOperators = {
-    {ArAdd, LogNot},
-    {ArSub, BitNot},
+    {ArAdd, UnPlus},
+    {ArSub, UnMinus},
     {LogNot, LogNot},
     {BitNot, BitNot}
 };
@@ -159,7 +159,8 @@ enum TokenType
     End,
     Return,
     Var,
-    Fun
+    Fun,
+    Eof
 };
 
 const std::unordered_map<std::string, TokenType> tokenMap = {
@@ -195,7 +196,8 @@ const std::unordered_map<TokenType, std::string> tokenStrings = {
     {End, "end"},
     {Return, "return"},
     {Var, "var"},
-    {Fun, "fun"}
+    {Fun, "fun"},
+    {Eof, ""}
 };
 
 struct Token
@@ -205,6 +207,11 @@ struct Token
     long long number;
     Operator oper;
     int line;
+
+    Token(TokenType type, int line)
+        : type(type)
+        , line(line)
+    {}
 
     Token(const std::string& str, int line)
         : line(line)
@@ -226,28 +233,27 @@ struct Token
         else
         {
             auto it = operatorMap.find(str);
-            errorAssert(it != operatorMap.end(), "Lex", "Invalid oper", line);
-
+            assert(it != operatorMap.end());
             type = Op;
             oper = it->second;
         }
     }
 
-    void print() const
+    void print(std::ostream& out) const
     {
         switch (type)
         {
         case Name:
-            std::cerr << name;
+            out << name;
             break;
         case Number:
-            std::cerr << number;
+            out << number;
             break;
         case Op:
-            std::cerr << operatorStrings.at(oper);
+            out << operatorStrings.at(oper);
             break;
         default:
-            std::cerr << tokenStrings.at(type);
+            out << tokenStrings.at(type);
             break;
         }
     }
@@ -257,29 +263,32 @@ struct TokenStream
 {
     std::vector<Token> tokens;
 
-    void print() const
+    void print(std::ostream& out) const
     {
-        int prevLine = 0;
+        int prevLine = 1;
         for (const Token& token : tokens)
         {
-            if (token.line > prevLine) std::cerr << "\n";
+            if (token.line > prevLine) out << "\n";
             prevLine = token.line;
-            token.print();
-            std::cerr << " ";
+            token.print(out);
+            out << " ";
         }
-        std::cerr << "\n";
+        out << "\n";
     }
 };
 
 void lexOperators(TokenStream& tokenStream, const std::string& str, int line)
 {
+    if (str.empty()) return;
+
     size_t prefLen;
     for (prefLen = str.size(); prefLen >= 1; --prefLen)
     {
-        if (operatorMap.find(str.substr(0, prefLen)) != operatorMap.end()) break;
+        std::string pref = str.substr(0, prefLen);
+        if (operatorMap.find(pref) != operatorMap.end() || tokenMap.find(pref) != tokenMap.end()) break;
     }
 
-    errorAssert(prefLen > 0, "Lex", "Invalid oper", line);
+    errorAssert(prefLen > 0, "Lex", "Invalid operator", line);
 
     tokenStream.tokens.emplace_back(str.substr(0, prefLen), line);
     lexOperators(tokenStream, str.substr(prefLen, str.size() - prefLen), line);
@@ -296,7 +305,7 @@ TokenStream lexProgram(std::istream& in)
         SPACE,
     };
 
-    int line = 0;
+    int line = 1;
     std::string curr = "";
     SymbolSet currSymbSet = ANY;
 
@@ -312,11 +321,12 @@ TokenStream lexProgram(std::istream& in)
         else if (isdigit(c)) cSet = currSymbSet == WORD ? WORD : NUMBER;
         else cSet = OPERATOR;
 
-        errorAssert(cSet != WORD || currSymbSet == NUMBER, "Lex", "Invalid digit", line);
+        errorAssert(cSet != WORD || currSymbSet != NUMBER, "Lex", "Invalid digit", line);
 
         if (cSet != currSymbSet && curr != "")
         {
-            tokenStream.tokens.emplace_back(curr, line);
+            if (currSymbSet == OPERATOR) lexOperators(tokenStream, curr, line);
+            else tokenStream.tokens.emplace_back(curr, line);
             curr = "";
             currSymbSet = ANY;
         }
@@ -329,6 +339,8 @@ TokenStream lexProgram(std::istream& in)
 
         if (c == '\n') ++line;
     }
+
+    tokenStream.tokens.emplace_back(Eof, line + 1);
 
     return tokenStream;
 }
@@ -357,6 +369,11 @@ bool isExpr(ASTNodeType type)
     return type == GetVar || type == ConstNumber || type == BinOperator || type == UnOperator || type == Application || type == Bracketed;
 }
 
+void printIndent(std::ostream& out, int indent)
+{
+    while (indent--) out << "  ";
+}
+
 struct ASTNode
 {
     ASTNodeType type;
@@ -364,7 +381,7 @@ struct ASTNode
     std::string name;
     long long number;
     Operator oper;
-    std::vector<std::string> argNames;
+    std::vector<std::string> paramNames;
 
     std::vector<ASTNode> children;
     int remaining;
@@ -392,18 +409,6 @@ struct ASTNode
         , remaining(remaining)
     {}
 
-    void addChild(const ASTNode& child)
-    {
-        children.push_back(child);
-        --remaining;
-    }
-
-    void addChild(ASTNode&& child)
-    {
-        children.emplace_back(std::move(child));
-        --remaining;
-    }
-
     bool isExpr() const
     {
         return ::isExpr(type);
@@ -413,28 +418,221 @@ struct ASTNode
     {
         return remaining == 0;
     }
+
+    bool needsExpr() const
+    {
+        return (
+            ((type == UnOperator || type == Bracketed || type == IgnoreValue || type == Assignment || type == ReturnVal || type == VarDef) && remaining == 1)
+            || (type == BinOperator && (remaining == 2 || remaining == 1))
+            || (type == Application && remaining == -1)
+            || (type == IfThenElse && remaining == 3)
+            || (type == WhileDo && remaining == 2)
+        );
+    }
+
+    bool needsBody() const
+    {
+        return (
+            (type == IfThenElse && (remaining == 2 || remaining == 1))
+            || ((type == WhileDo || type == FunDef) && remaining == 1)
+            || ((type == Program || type == Sequence) && remaining == -1)
+        );
+    }
+
+    void addChild(ASTNode&& child)
+    {
+        assert(remaining != 0);
+        if (remaining > 0) --remaining;
+        children.emplace_back(std::move(child));
+    }
+
+    void addExpr(ASTNode&& expr)
+    {
+        assert(needsExpr());
+        addChild(std::move(expr));
+    }
+
+    void addBody(ASTNode&& body)
+    {
+        assert(needsBody());
+        addChild(std::move(body));
+    }
+
+    bool isEmptyNode() const
+    {
+        return type == Sequence && remaining == 0 && children.size() == 0;
+    }
+
+    static const ASTNode emptyNode;
+
+    void print(std::ostream& out, int indent = 0) const
+    {
+        switch (type)
+        {
+        case GetVar:
+            out << name;
+            break;
+
+        case ConstNumber:
+            out << number;
+            break;
+
+        case BinOperator:
+            out << "(";
+            if (children.size() > 0) children[0].print(out, indent + 1);
+            out << " " << operatorStrings.at(oper) << " ";
+            if (children.size() > 1) children[1].print(out, indent + 1);
+            out << ")";
+            break;
+
+        case UnOperator:
+            out << operatorStrings.at(oper);
+            if (children.size() > 0) children[0].print(out, indent + 1);
+            break;
+
+        case Application:
+            out << name << "(";
+            for (size_t i = 0; i < children.size(); ++i)
+            {
+                if (i > 0) out << ", ";
+                children[i].print(out, indent + 1);
+            }
+            out << ")";
+            break;
+
+        case Bracketed:
+            out << "(";
+            if (children.size() > 0) children[0].print(out, indent + 1);
+            out << ")";
+            break;
+
+        case IgnoreValue:
+            printIndent(out, indent);
+            if (children.size() > 0) children[0].print(out, indent + 1);
+            out << ";" << "\n";
+            break;
+
+        case Assignment:
+            printIndent(out, indent);
+            out << name << " = ";
+            if (children.size() > 0) children[0].print(out, indent + 1);
+            out << ";" << "\n";
+            break;
+
+        case IfThenElse:
+            for (size_t i = 0; i < children.size() + remaining; ++i)
+            {
+                if (i == 0)
+                {
+                    printIndent(out, indent);
+                    out << "if" << "\n";
+                    printIndent(out, indent + 1);
+                    if (children.size() > i) children[i].print(out, indent + 1);
+                    out << "\n";
+                }
+                else if (i + 1 == children.size() + remaining)
+                {
+                    printIndent(out, indent);
+                    out << "else" << "\n";
+                    if (children.size() > i) children[i].print(out, indent + 1);
+                }
+                else if (i % 2 == 0)
+                {
+                    printIndent(out, indent);
+                    out << "elif" << "\n";
+                    printIndent(out, indent + 1);
+                    if (children.size() > i) children[i].print(out, indent + 1);
+                    out << "\n";
+                }
+                else
+                {
+                    printIndent(out, indent);
+                    out << "then" << "\n";
+                    if (children.size() > i) children[i].print(out, indent + 1);
+                }
+            }
+            printIndent(out, indent);
+            out << "end" << "\n";
+            break;
+
+        case WhileDo:
+            printIndent(out, indent);
+            out << "while" << "\n";
+            printIndent(out, indent + 1);
+            if (children.size() > 0) children[0].print(out, indent + 1);
+            out << "\n";
+            printIndent(out, indent);
+            out << "do" << "\n";
+            if (children.size() > 1) children[1].print(out, indent + 1);
+            printIndent(out, indent);
+            out << "end" << "\n";
+            break;
+
+        case ReturnVal:
+            printIndent(out, indent);
+            out << "return ";
+            if (children.size() > 0) children[0].print(out, indent + 1);
+            out << ";" << "\n";
+            break;
+
+        case Sequence:
+            for (const ASTNode& child : children)
+            {
+                child.print(out, indent);
+            }
+            break;
+
+        case VarDef:
+            printIndent(out, indent);
+            out << "var " << name << " = ";
+            if (children.size() > 0) children[0].print(out, indent + 1);
+            out << ";" << "\n";
+            break;
+
+        case FunDef:
+            printIndent(out, indent);
+            out << "fun " << name << "(";
+            for (size_t i = 0; i < paramNames.size(); ++i)
+            {
+                if (i > 0) out << ", ";
+                out << paramNames[i];
+            }
+            out << ") =" << "\n";
+            if (children.size() > 0) children[0].print(out, indent + 1);
+            printIndent(out, indent);
+            out << "end" << "\n";
+            break;
+
+        case Program:
+            for (const ASTNode& child : children)
+            {
+                child.print(out, indent);
+                out << "\n";
+            }
+            break;
+        }
+    }
 };
 
-void popSequence(std::vector<ASTNode>& nodeStack, int line)
+const ASTNode ASTNode::emptyNode(Sequence, 0);
+
+bool popBody(std::vector<ASTNode>& nodeStack, int line)
 {
     ASTNode seq(Sequence, -1);
-    while (nodeStack.back().isComplete())
+    while (nodeStack.back().isComplete() && !nodeStack.back().isExpr())
     {
-        errorAssert(!nodeStack.back().isExpr(), "Parse", "Unexpected complete expression in sequence", line);
-        seq.addChild(std::move(nodeStack.back()));
+        seq.addBody(std::move(nodeStack.back()));
         nodeStack.pop_back();
     }
 
+    if (!nodeStack.back().needsBody()) return false;
+
     seq.remaining = 0;
-
     std::reverse(seq.children.begin(), seq.children.end());
-    if (seq.children.size() == 1)
-    {
-        seq = std::move(seq.children.back());
-        seq.children.clear();
-    }
+    if (seq.children.size() == 1) seq = std::move(seq.children.back());
+    nodeStack.back().addBody(std::move(seq));
 
-    nodeStack.back().addChild(std::move(seq));
+    return true;
 }
 
 ASTNode popOperators(std::vector<ASTNode>& nodeStack, int prec, int line)
@@ -442,12 +640,12 @@ ASTNode popOperators(std::vector<ASTNode>& nodeStack, int prec, int line)
     ASTNode right = std::move(nodeStack.back());
     nodeStack.pop_back();
 
-    errorAssert(right.isComplete() && right.isExpr(), "Parse", "Incplete expression", line);
+    if (!right.isComplete() || !right.isExpr()) return ASTNode::emptyNode;
 
-    while (nodeStack.back().type == BinOperator || nodeStack.back().type == UnOperator)
+    while ((nodeStack.back().type == BinOperator || nodeStack.back().type == UnOperator) && operatorPrec.at(nodeStack.back().oper) >= prec)
     {
-        errorAssert(!nodeStack.back().isComplete(), "Parse", "Unexpected complete expression", line);
-        nodeStack.back().addChild(std::move(right));
+        assert(!nodeStack.back().isComplete());
+        nodeStack.back().addExpr(std::move(right));
         right = std::move(nodeStack.back());
         nodeStack.pop_back();
     }
@@ -493,12 +691,12 @@ ASTNode parseProgram(const TokenStream& tokenStream)
             }
             else if (defState == DefParam)
             {
-                if (last.argNames.empty())
+                if (last.paramNames.empty())
                     errorAssert(token.type == Name || token.type == RBrack, "Parse", "Expected parameter name or right bracket list in defition", line);
                 else errorAssert(token.type == Name, "Parse", "Expected parameter name in defition", line);
                 if (token.type == Name)
                 {
-                    last.argNames.push_back(token.name);
+                    last.paramNames.push_back(token.name);
                     defState = DefParamSep;
                 }
                 else if (token.type == RBrack) defState = DefAssign;
@@ -520,12 +718,12 @@ ASTNode parseProgram(const TokenStream& tokenStream)
         switch (token.type)
         {
         case Name:
-            errorAssert(last.isComplete() && last.isExpr(), "Parse", "Unexpected complete expression before name", line);
+            errorAssert(!last.isComplete() || !last.isExpr(), "Parse", "Unexpected name", line);
             nodeStack.emplace_back(GetVar, token.name, 0);
             break;
 
         case Number:
-            errorAssert(last.isComplete() && last.isExpr(), "Parse", "Unexpected complete expression before number", line);
+            errorAssert(!last.isComplete() || !last.isExpr(), "Parse", "Unexpected number", line);
             nodeStack.emplace_back(ConstNumber, token.number, 0);
             break;
 
@@ -535,14 +733,15 @@ ASTNode parseProgram(const TokenStream& tokenStream)
             auto itUn = unOperators.find(token.oper);
             bool okBin = last.isComplete() && last.isExpr();
             bool okUn = !okBin;
-            errorAssert(itUn != unOperators.end() || okBin, "Parse", "Expected complete expression before binary operator", line);
-            errorAssert(itBin != binOperators.end() || okUn, "Parse", "Unexpected complete expression before binary operator", line);
+            errorAssert(itUn != unOperators.end() || okBin, "Parse", "Unexpected binary operator", line);
+            errorAssert(itBin != binOperators.end() || okUn, "Parse", "Unexpected unary operator", line);
             if (itUn != unOperators.end() && okUn) nodeStack.emplace_back(UnOperator, itUn->second, 1);
             else
             {
                 ASTNode left = popOperators(nodeStack, operatorPrec.at(token.oper), line);
+                assert(!left.isEmptyNode());
                 nodeStack.emplace_back(BinOperator, token.oper, 2);
-                nodeStack.back().addChild(std::move(left));
+                nodeStack.back().addExpr(std::move(left));
             }
             break;
         }
@@ -552,6 +751,8 @@ ASTNode parseProgram(const TokenStream& tokenStream)
             errorAssert(last.type == GetVar, "Parse", "LHS of assignment needs to be a variable", line);
             std::string name = last.name;
             nodeStack.pop_back();
+            ASTNode& last = nodeStack.back();
+            errorAssert(!last.isExpr() && (last.isComplete() || last.needsBody()), "Parse", "Unexpected assignment", line);
             nodeStack.emplace_back(Assignment, name, 1);
             break;
         }
@@ -561,14 +762,16 @@ ASTNode parseProgram(const TokenStream& tokenStream)
             ASTNode expr = popOperators(nodeStack, 0, line);
             ASTNode& last = nodeStack.back();
             errorAssert(
-                (!last.isComplete() && (last.type == Assignment || last.type == ReturnVal)) || (last.isComplete() && !last.isExpr()),
-                "Parse", "Unexpected semicolon", line
+                !expr.isEmptyNode() &&
+                ((!last.isComplete() && (last.type == Assignment || last.type == ReturnVal || last.type == VarDef || last.type == FunDef))
+                || (last.isComplete() && !last.isExpr()))
+                , "Parse", "Unexpected semicolon", line
             );
-            if (last.isComplete()) last.addChild(std::move(expr));
+            if (!last.isComplete()) last.addExpr(std::move(expr));
             else
             {
                 nodeStack.emplace_back(IgnoreValue, 1);
-                nodeStack.back().addChild(std::move(expr));
+                nodeStack.back().addExpr(std::move(expr));
             }
             break;
         }
@@ -577,8 +780,8 @@ ASTNode parseProgram(const TokenStream& tokenStream)
         {
             ASTNode expr = popOperators(nodeStack, 0, line);
             ASTNode& last = nodeStack.back();
-            errorAssert(!last.isComplete() && last.type == Application, "Parse", "Unexpected comma", line);
-            last.addChild(std::move(expr));
+            errorAssert(!expr.isEmptyNode() && !last.isComplete() && last.type == Application, "Parse", "Unexpected comma", line);
+            last.addExpr(std::move(expr));
             break;
         }
 
@@ -591,16 +794,22 @@ ASTNode parseProgram(const TokenStream& tokenStream)
             }
             else
             {
-                errorAssert(last.isComplete() && last.isExpr(), "Parse", "Unexpected complete expression before opening bracket", line);
+                errorAssert(!last.isComplete() || !last.isExpr(), "Parse", "Unexpected opening bracket", line);
                 nodeStack.emplace_back(Bracketed, 1);
             }
             break;
 
         case RBrack:
         {
+            if (!last.isComplete() && last.type == Application && last.children.empty())
+            {
+                last.remaining = 0;
+                break;
+            }
+
             ASTNode expr = popOperators(nodeStack, 0, line);
             ASTNode& last = nodeStack.back();
-            errorAssert(!last.isComplete() && (last.type == Bracketed || last.type == Application), "Parse", "Unmatched closing bracket", line);
+            errorAssert(!expr.isEmptyNode() && !last.isComplete() && (last.type == Bracketed || last.type == Application), "Parse", "Unmatched closing bracket", line);
             if (last.type == Bracketed)
             {
                 nodeStack.pop_back();
@@ -608,13 +817,14 @@ ASTNode parseProgram(const TokenStream& tokenStream)
             }
             else
             {
-                last.addChild(std::move(expr));
+                last.addExpr(std::move(expr));
                 last.remaining = 0;
             }
             break;
         }
 
         case If:
+            errorAssert(!last.isExpr() && (last.isComplete() || last.needsBody()), "Parse", "Unexpected if", line);
             nodeStack.emplace_back(IfThenElse, 3);
             break;
 
@@ -622,29 +832,30 @@ ASTNode parseProgram(const TokenStream& tokenStream)
         {
             ASTNode expr = popOperators(nodeStack, 0, line);
             ASTNode& last = nodeStack.back();
-            errorAssert(last.remaining == 3 && last.type == IfThenElse, "Parse", "Unexpected then", line);
-            last.addChild(std::move(expr));
+            errorAssert(!expr.isEmptyNode() && last.remaining == 3 && last.type == IfThenElse, "Parse", "Unexpected then", line);
+            last.addExpr(std::move(expr));
             break;
         }
 
         case Elif:
         {
-            popSequence(nodeStack, line);
+            bool succ = popBody(nodeStack, line);
             ASTNode& last = nodeStack.back();
-            errorAssert(last.remaining == 1 && last.type == IfThenElse, "Parse", "Unexpected elif", line);
+            errorAssert(succ && last.remaining == 1 && last.type == IfThenElse, "Parse", "Unexpected elif", line);
             last.remaining += 2;
             break;
         }
 
         case Else:
         {
-            popSequence(nodeStack, line);
+            bool succ = popBody(nodeStack, line);
             ASTNode& last = nodeStack.back();
-            errorAssert(last.remaining == 1 && last.type == IfThenElse, "Parse", "Unexpected else", line);
+            errorAssert(succ && last.remaining == 1 && last.type == IfThenElse, "Parse", "Unexpected else", line);
             break;
         }
 
         case While:
+            errorAssert(!last.isExpr() && (last.isComplete() || last.needsBody()), "Parse", "Unexpected while", line);
             nodeStack.emplace_back(WhileDo, 2);
             break;
 
@@ -652,44 +863,60 @@ ASTNode parseProgram(const TokenStream& tokenStream)
         {
             ASTNode expr = popOperators(nodeStack, 0, line);
             ASTNode& last = nodeStack.back();
-            errorAssert(last.remaining == 2 && last.type == WhileDo, "Parse", "Unexpected do", line);
-            last.addChild(std::move(expr));
+            errorAssert(!expr.isEmptyNode() && last.remaining == 2 && last.type == WhileDo, "Parse", "Unexpected do", line);
+            last.addExpr(std::move(expr));
             break;
         }
 
         case End:
         {
-            popSequence(nodeStack, line);
+            bool succ = popBody(nodeStack, line);
             ASTNode& last = nodeStack.back();
-            errorAssert(last.isComplete() && (last.type == IfThenElse || last.type == WhileDo || last.type == FunDef), "Parse", "Unexpected end", line);
+            errorAssert(succ && last.isComplete() && (last.type == IfThenElse || last.type == WhileDo || last.type == FunDef), "Parse", "Unexpected end", line);
             break;
         }
 
         case Return:
+            errorAssert(!last.isExpr() && (last.isComplete() || last.needsBody()), "Parse", "Unexpected return", line);
             nodeStack.emplace_back(ReturnVal, 1);
             break;
 
         case Var:
-            nodeStack.emplace_back(VarDef, 0);
+            errorAssert(!last.isExpr() && (last.isComplete() || last.needsBody()), "Parse", "Unexpected variable definition", line);
+            nodeStack.emplace_back(VarDef, 1);
             defState = DefName;
             break;
 
         case Fun:
+            errorAssert(!last.isExpr() && (last.isComplete() || last.needsBody()), "Parse", "Unexpected function definition", line);
             nodeStack.emplace_back(FunDef, 1);
             defState = DefName;
             break;
+
+        case Eof:
+        {
+            bool succ = popBody(nodeStack, line);
+            ASTNode& last = nodeStack.back();
+            errorAssert(succ && last.type == Program, "Parse", "Unexpected end of file", line);
+            assert(last.children.size() == 1);
+            if (last.children.back().type == Sequence) last.children = std::move(last.children.back().children);
+            last.remaining = 0;
+        }
         }
     }
 
-    return ASTNode(ConstNumber, 0, 0);
+    return nodeStack.back();
 }
 
 int main()
 {
     TokenStream tokenStream = lexProgram(std::cin);
-    tokenStream.print();
+    tokenStream.print(std::cerr);
+
+    std::cerr << "\n";
 
     ASTNode astRoot = parseProgram(tokenStream);
+    astRoot.print(std::cerr);
 
     return 0;
 }

@@ -13,6 +13,8 @@ void errorAssert(bool cond, const std::string& type, const std::string& descr, i
     exit(0);
 }
 
+typedef long long ValueT;
+
 enum Operator
 {
     UnPlus,
@@ -204,7 +206,7 @@ struct Token
 {
     TokenType type;
     std::string name;
-    long long number;
+    ValueT number;
     Operator oper;
     int line;
 
@@ -228,7 +230,7 @@ struct Token
         else if (isdigit(str[0]))
         {
             type = Number;
-            number = stoi(str);
+            number = stoll(str);
         }
         else
         {
@@ -358,7 +360,7 @@ enum ASTNodeType
     IfThenElse,
     WhileDo,
     ReturnVal,
-    Sequence,
+    Body,
     VarDef,
     FunDef,
     Program
@@ -379,7 +381,7 @@ struct ASTNode
     ASTNodeType type;
 
     std::string name;
-    long long number;
+    ValueT number;
     Operator oper;
     std::vector<std::string> paramNames;
 
@@ -401,7 +403,7 @@ struct ASTNode
         , line(line)
     {}
 
-    ASTNode(ASTNodeType type, long long number, int remaining, int line)
+    ASTNode(ASTNodeType type, ValueT number, int remaining, int line)
         : type(type)
         , number(number)
         , remaining(remaining)
@@ -441,8 +443,13 @@ struct ASTNode
         return (
             (type == IfThenElse && (remaining == 2 || remaining == 1))
             || ((type == WhileDo || type == FunDef) && remaining == 1)
-            || ((type == Program || type == Sequence) && remaining == -1)
+            || (type == Program && remaining == -1)
         );
+    }
+
+    bool needsStmt() const
+    {
+        return type == Body && remaining == -1;
     }
 
     void addChild(ASTNode&& child)
@@ -454,19 +461,25 @@ struct ASTNode
 
     void addExpr(ASTNode&& expr)
     {
-        assert(needsExpr());
+        assert(needsExpr() && expr.isExpr() && expr.isComplete());
         addChild(std::move(expr));
     }
 
     void addBody(ASTNode&& body)
     {
-        assert(needsBody());
+        assert(needsBody() && body.type == Body && body.isComplete());
         addChild(std::move(body));
+    }
+
+    void addStmt(ASTNode&& stmt)
+    {
+        assert(needsStmt() && !stmt.isExpr() && stmt.type != Body && stmt.type != Program);
+        addChild(std::move(stmt));
     }
 
     bool isEmptyNode() const
     {
-        return type == Sequence && remaining == 0 && children.size() == 0 && line == 0;
+        return type == Body && remaining == 0 && children.size() == 0 && line == 0;
     }
 
     static const ASTNode emptyNode;
@@ -581,7 +594,7 @@ struct ASTNode
             out << ";" << "\n";
             break;
 
-        case Sequence:
+        case Body:
             for (const ASTNode& child : children)
             {
                 child.print(out, indent);
@@ -610,33 +623,33 @@ struct ASTNode
             break;
 
         case Program:
-            for (const ASTNode& child : children)
+            for (size_t i = 0; i < children.size(); ++i)
             {
-                child.print(out, indent);
-                out << "\n";
+                if (i > 0 && (children[i].type == FunDef || children[i - 1].type == FunDef)) out << "\n";
+                children[i].print(out, indent);
             }
+            out << "\n";
             break;
         }
     }
 };
 
-const ASTNode ASTNode::emptyNode(Sequence, 0, 0);
+const ASTNode ASTNode::emptyNode(Body, 0, 0);
 
 bool popBody(std::vector<ASTNode>& nodeStack, int line)
 {
-    ASTNode seq(Sequence, -1, line);
+    ASTNode body(Body, -1, line);
     while (nodeStack.back().isComplete() && !nodeStack.back().isExpr())
     {
-        seq.addBody(std::move(nodeStack.back()));
+        body.addStmt(std::move(nodeStack.back()));
         nodeStack.pop_back();
     }
 
     if (!nodeStack.back().needsBody()) return false;
 
-    seq.remaining = 0;
-    std::reverse(seq.children.begin(), seq.children.end());
-    if (seq.children.size() == 1) seq = std::move(seq.children.back());
-    nodeStack.back().addBody(std::move(seq));
+    body.remaining = 0;
+    std::reverse(body.children.begin(), body.children.end());
+    nodeStack.back().addBody(std::move(body));
 
     return true;
 }
@@ -746,7 +759,7 @@ ASTNode parseProgram(const TokenStream& tokenStream)
             {
                 ASTNode left = popOperators(nodeStack, operatorPrec.at(token.oper), line);
                 assert(!left.isEmptyNode());
-                nodeStack.emplace_back(BinOperator, token.oper, 2, line);
+                nodeStack.emplace_back(BinOperator, token.oper, 2, left.line);
                 nodeStack.back().addExpr(std::move(left));
             }
             break;
@@ -775,7 +788,7 @@ ASTNode parseProgram(const TokenStream& tokenStream)
             if (!last.isComplete()) last.addExpr(std::move(expr));
             else
             {
-                nodeStack.emplace_back(IgnoreValue, 1, line);
+                nodeStack.emplace_back(IgnoreValue, 1, expr.line);
                 nodeStack.back().addExpr(std::move(expr));
             }
             break;
@@ -903,7 +916,7 @@ ASTNode parseProgram(const TokenStream& tokenStream)
             ASTNode& last = nodeStack.back();
             errorAssert(succ && last.type == Program, "Parse", "Unexpected end of file", line);
             assert(last.children.size() == 1);
-            if (last.children.back().type == Sequence) last.children = std::move(last.children.back().children);
+            if (last.children.back().type == Body) last.children = std::move(last.children.back().children);
             last.remaining = 0;
             break;
         }
@@ -913,15 +926,180 @@ ASTNode parseProgram(const TokenStream& tokenStream)
     return nodeStack.back();
 }
 
+struct Instr
+{
+
+};
+
+struct InstrStream
+{
+    std::vector<Instr> instrs;
+};
+
+void compileASTNode(const ASTNode& node, InstrStream& instrStream)
+{
+    assert(node.isComplete());
+
+    switch (node.type)
+    {
+    case GetVar:
+        assert(node.children.empty());
+        // instrStream.instrs.emplace_back(Global or Local);
+        // instrStream.instrs.emplace_back(Load);
+        break;
+
+    case ConstNumber:
+        assert(node.children.empty());
+        // instrStream.instrs.emplace_back(Push, node.number);
+        break;
+
+    case BinOperator:
+        assert(node.children.size() == 2);
+        assert(node.children[0].isExpr());
+        assert(node.children[1].isExpr());
+        // TODO: Short circuit AND and OR
+        compileASTNode(node.children[0], instrStream);
+        compileASTNode(node.children[1], instrStream);
+        // instrStream.instrs.emplace_back(BinOperator, node.oper);
+        break;
+
+    case UnOperator:
+        assert(node.children.size() == 1);
+        assert(node.children[0].isExpr());
+        compileASTNode(node.children[0], instrStream);
+        // instrStream.instrs.emplace_back(UnOperator, node.oper);
+        break;
+
+    case Application:
+        // errorAsert(node.children.size() == FUNCTION_VALENCY, "Compile", "Wrong number of arguments", node.line);
+        for (const ASTNode& child : node.children)
+        {
+            assert(child.isExpr());
+            compileASTNode(child, instrStream);
+        }
+        // instrStream.instrs.emplace_back(Global);
+        // instrStream.instrs.emplace_back(Call);
+        break;
+
+    case Bracketed:
+        assert(node.children.size() == 1);
+        assert(node.children[0].isExpr());
+        compileASTNode(node.children[0], instrStream);
+        break;
+
+    case IgnoreValue:
+        assert(node.children.size() == 1);
+        assert(node.children[0].isExpr());
+        compileASTNode(node.children[0], instrStream);
+        // instrStream.instrs.emplace_back(Pop);
+        break;
+
+    case Assignment:
+        assert(node.children.size() == 1);
+        assert(node.children[0].isExpr());
+        // instrStream.instrs.emplace_back(Global or Local);
+        compileASTNode(node.children[0], instrStream);
+        // instrStream.instrs.emplace_back(Assign);
+        break;
+
+    case IfThenElse:
+        assert(node.children.size() % 2 == 1 && node.children.size() >= 3);
+        for (size_t i = 0; i < node.children.size(); ++i)
+        {
+            const ASTNode& child = node.children[i];
+            if (i % 2 == 0 && i < node.children.size() - 1)
+            {
+                assert(child.isExpr());
+                compileASTNode(child, instrStream);
+                // instrStream.instrs.emplace_back(JumpIfZero, END_OF_THEN);
+            }
+            else if (i % 2 == 1)
+            {
+                assert(child.type == Body);
+                compileASTNode(child, instrStream);
+                // instrStream.instrs.emplace_back(Jump, END_OF_IF);
+                // set END_OF_THEN
+            }
+            else
+            {
+                assert(child.type == Body);
+                compileASTNode(child, instrStream);
+                // set END_OF_IF
+            }
+        }
+        break;
+
+    case WhileDo:
+        assert(node.children.size() == 2);
+        assert(node.children[0].isExpr());
+        assert(node.children[1].type == Body);
+        // instrStream.instrs.emplace_back(Jump, COND_OF_WHILE);
+        // set START_OF_WHILE
+        compileASTNode(node.children[1], instrStream);
+        compileASTNode(node.children[0], instrStream);
+        // set COND_OF_WHILE
+        // instrStream.instrs.emplace_back(JumpIfNotZero, START_OF_WHILE);
+        break;
+
+    case ReturnVal:
+        assert(node.children.size() == 1);
+        assert(node.children[0].isExpr());
+        compileASTNode(node.children[0], instrStream);
+        // instrStream.instrs.emplace_back(Return);
+        break;
+
+    case Body:
+        // TODO: Handle variable defs
+        for (const ASTNode& child : node.children)
+        {
+            assert(!child.isExpr() && child.type != Body && child.type != Program);
+            errorAssert(child.type != FunDef, "Compile", "Illegal nested function definition", child.line);
+            compileASTNode(child, instrStream);
+        }
+        break;
+
+    case VarDef:
+        assert(node.children.size() == 1);
+        assert(node.children[0].isExpr());
+        // instrStream.instrs.emplace_back(Global or Local);
+        compileASTNode(node.children[0], instrStream);
+        break;
+
+    case FunDef:
+        // TODO: Handle "param" defs
+        assert(node.children.size() == 1);
+        assert(node.children[0].type == Body);
+        compileASTNode(node.children[0], instrStream);
+        // instrStream.instrs.emplace_back(Push, 0);
+        // instrStream.instrs.emplace_back(Return);
+        break;
+
+    case Program:
+        // TODO: Handle variable and fun defs
+        for (const ASTNode& child : node.children)
+        {
+            assert(!child.isExpr() && child.type != Body && child.type != Program);
+            errorAssert(child.type == VarDef || child.type == FunDef, "Compile", "Illegal statement outside function body", child.line);
+            compileASTNode(child, instrStream);
+        }
+        break;
+    }
+}
+
 int main()
 {
     TokenStream tokenStream = lexProgram(std::cin);
+
+    std::cerr << "Lexed program:\n\n";
     tokenStream.print(std::cerr);
 
-    std::cerr << "\n";
-
     ASTNode astRoot = parseProgram(tokenStream);
+
+    std::cerr << "Parsed program:\n\n";
     astRoot.print(std::cerr);
+
+    InstrStream instrStream;
+    compileASTNode(astRoot, instrStream);
 
     return 0;
 }

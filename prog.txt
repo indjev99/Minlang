@@ -26,5 +26,3 @@ fun main() =
     x = input();
     return 0;
 end
-
-main();

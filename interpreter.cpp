@@ -1386,6 +1386,8 @@ int main()
     astRoot.print(std::cerr);
 
     InstrStream instrStream = compileProgram(astRoot);
+
+    std::cerr << "Compiled program:\n\n";
     instrStream.print(std::cerr);
 
     return 0;

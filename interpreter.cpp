@@ -781,11 +781,11 @@ ASTNode parseProgram(const TokenStream& tokenStream)
             ASTNode& last = nodeStack.back();
             errorAssert(
                 !expr.isEmptyNode() &&
-                ((!last.isComplete() && (last.type == Assignment || last.type == ReturnVal || last.type == VarDef || last.type == FunDef))
-                || (last.isComplete() && !last.isExpr()))
+                ((last.needsExpr() && (last.type == Assignment || last.type == ReturnVal || last.type == VarDef))
+                || last.needsBody() || (last.isComplete() && !last.isExpr()))
                 , "Parse", "Unexpected semicolon", line
             );
-            if (!last.isComplete()) last.addExpr(std::move(expr));
+            if (last.needsExpr()) last.addExpr(std::move(expr));
             else
             {
                 nodeStack.emplace_back(IgnoreValue, 1, expr.line);
@@ -926,164 +926,451 @@ ASTNode parseProgram(const TokenStream& tokenStream)
     return nodeStack.back();
 }
 
+enum InstrType
+{
+    IPush,
+    IPop,
+    IBinOp,
+    IUnOp,
+    IGlobal,
+    ILocal,
+    ILoad,
+    IStore,
+    IJmp,
+    IJzr,
+    IJnz,
+    IAddr,
+    ICall,
+    IReturn,
+    IRead,
+    IPrint,
+    IExit
+};
+
+std::unordered_map<InstrType, std::string> intrStrings = {
+    {IPush, "push"},
+    {IPop, "pop"},
+    {IBinOp, "binOp"},
+    {IUnOp, "unOp"},
+    {IGlobal, "global"},
+    {ILocal, "local"},
+    {ILoad, "load"},
+    {IStore, "store"},
+    {IJmp, "jmp"},
+    {IJzr, "jzr"},
+    {IJnz, "jnz"},
+    {IAddr, "addr"},
+    {ICall, "call"},
+    {IReturn, "return"},
+    {IRead, "read"},
+    {IPrint, "print"},
+    {IExit, "exit"}
+};
+
 struct Instr
 {
+    InstrType type;
+    ValueT arg;
 
+    Instr(InstrType type)
+        : type(type)
+    {}
+
+    Instr(InstrType type, ValueT arg)
+        : type(type)
+        , arg(arg)
+    {}
+
+    void print(std::ostream& out) const
+    {
+        std::cerr << intrStrings.at(type);
+        if (type != IPop && type != ILoad && type != IStore && type != IReturn && type != IRead && type != IPrint && type != IExit)
+            std::cerr << " " << arg;
+        std::cerr << "\n";
+    }
 };
 
 struct InstrStream
 {
     std::vector<Instr> instrs;
+
+    void print(std::ostream& out) const
+    {
+        for (size_t i = 0; i < instrs.size(); ++i)
+        {
+            std::cerr << i << ": ";
+            instrs[i].print(std::cerr);
+        }
+    }
 };
 
-void compileASTNode(const ASTNode& node, InstrStream& instrStream)
+enum DefType
+{
+    DefFun,
+    DefGlobalVar,
+    DefLocalVar
+};
+
+struct Definition
+{
+    DefType type;
+    ValueT addr;
+    ValueT params;
+
+    Definition(DefType type, ValueT addr)
+        : type(type)
+        , addr(addr)
+    {}
+
+    Definition(DefType type, ValueT addr, ValueT params)
+        : type(type)
+        , addr(addr)
+        , params(params)
+    {}
+};
+
+struct Env
+{
+    std::vector<ValueT> frameOffsets;
+
+    std::unordered_map<std::string, std::vector<Definition>> defs;
+    std::vector<std::unordered_set<std::string>> scopeDefs;
+
+    std::unordered_map<ValueT, ValueT> labelAddrs;
+    ValueT currLabel = 0;
+
+    void pushFrame()
+    {
+        frameOffsets.push_back(0);
+    }
+
+    void popFrame()
+    {
+        assert(frameOffsets.back() == 0);
+        frameOffsets.pop_back();
+    }
+
+    void pushScope()
+    {
+        scopeDefs.emplace_back();
+    }
+
+    void popScope()
+    {
+        for (const std::string& name : scopeDefs.back())
+        {
+            auto it = defs.find(name);
+            assert(it != defs.end());
+            if (it->second.back().type == DefLocalVar || it->second.back().type == DefGlobalVar) --frameOffsets.back();
+            it->second.pop_back();
+            if (it->second.empty()) defs.erase(it);
+        }
+        scopeDefs.pop_back();
+    }
+
+    void defineFun(const std::string& name, ValueT addr, ValueT params, int line)
+    {
+        errorAssert(scopeDefs.back().find(name) == scopeDefs.back().end(), "Compile", "Multiple definitions of function", line);
+        defs.insert({name, {}});
+        defs[name].emplace_back(DefFun, addr, params);
+        scopeDefs.back().insert(name);
+    }
+
+    void defineVar(const std::string& name, DefType type, int line)
+    {
+        errorAssert(scopeDefs.back().find(name) == scopeDefs.back().end(), "Compile", "Multiple definitions of variable in the same scope", line);
+        defs.insert({name, {}});
+        defs[name].emplace_back(type, frameOffsets.back()++);
+        scopeDefs.back().insert(name);
+    }
+
+    const Definition& getDef(const std::string& name, int line)
+    {
+        auto it = defs.find(name);
+        errorAssert(it != defs.end(), "Compile", "Undefined variable or function", line);
+        return it->second.back();
+    }
+
+    ValueT newLabel()
+    {
+        return currLabel++;
+    }
+
+    void setLabelAddr(ValueT label, ValueT addr)
+    {
+        labelAddrs[label] = addr;
+    }
+
+    ValueT getLabelAddr(ValueT label)
+    {
+        auto it = labelAddrs.find(label);
+        assert(it != labelAddrs.end());
+        return it->second;
+    }
+};
+
+void compileASTNode(const ASTNode& node, Env& env, InstrStream& instrStream)
 {
     assert(node.isComplete());
 
     switch (node.type)
     {
     case GetVar:
+    {
         assert(node.children.empty());
-        // instrStream.instrs.emplace_back(Global or Local);
-        // instrStream.instrs.emplace_back(Load);
+        const Definition& def = env.getDef(node.name, node.line);
+        errorAssert(def.type == DefGlobalVar || def.type == DefLocalVar, "Compile", "Cannot get value of function", node.line);
+        instrStream.instrs.emplace_back(def.type == DefGlobalVar ? IGlobal : ILocal, def.addr);
+        instrStream.instrs.emplace_back(ILoad);
         break;
+    }
 
     case ConstNumber:
         assert(node.children.empty());
-        // instrStream.instrs.emplace_back(Push, node.number);
+        instrStream.instrs.emplace_back(IPush, node.number);
         break;
 
     case BinOperator:
         assert(node.children.size() == 2);
         assert(node.children[0].isExpr());
         assert(node.children[1].isExpr());
-        // TODO: Short circuit AND and OR
-        compileASTNode(node.children[0], instrStream);
-        compileASTNode(node.children[1], instrStream);
-        // instrStream.instrs.emplace_back(BinOperator, node.oper);
+        if (node.oper == LogAnd || node.oper == LogOr)
+        {
+            ValueT endOfSecond = env.newLabel();
+            instrStream.instrs.emplace_back(IPush, node.oper == LogAnd ? 0 : 1);
+            compileASTNode(node.children[0], env, instrStream);
+            instrStream.instrs.emplace_back(node.oper == LogAnd ? IJzr : IJnz, endOfSecond);
+            instrStream.instrs.emplace_back(IUnOp, LogNot);
+            compileASTNode(node.children[1], env, instrStream);
+            env.setLabelAddr(endOfSecond, instrStream.instrs.size());
+        }
+        else
+        {
+            compileASTNode(node.children[0], env, instrStream);
+            compileASTNode(node.children[1], env, instrStream);
+        }
+        instrStream.instrs.emplace_back(IBinOp, node.oper);
         break;
 
     case UnOperator:
         assert(node.children.size() == 1);
         assert(node.children[0].isExpr());
-        compileASTNode(node.children[0], instrStream);
-        // instrStream.instrs.emplace_back(UnOperator, node.oper);
+        compileASTNode(node.children[0], env, instrStream);
+        instrStream.instrs.emplace_back(IUnOp, node.oper);
         break;
 
     case Application:
-        // errorAsert(node.children.size() == FUNCTION_VALENCY, "Compile", "Wrong number of arguments", node.line);
+    {
+        const Definition& def = env.getDef(node.name, node.line);
+        errorAssert(def.type == DefFun, "Compile", "Cannot call variable", node.line);
+        errorAssert(def.params == (ValueT) node.children.size(), "Compile", "Wrong number of arguments in function call", node.line);
         for (const ASTNode& child : node.children)
         {
             assert(child.isExpr());
-            compileASTNode(child, instrStream);
+            compileASTNode(child, env, instrStream);
         }
-        // instrStream.instrs.emplace_back(Global);
-        // instrStream.instrs.emplace_back(Call);
+        instrStream.instrs.emplace_back(IAddr, def.addr);
+        instrStream.instrs.emplace_back(ICall, node.children.size());
         break;
+    }
 
     case Bracketed:
         assert(node.children.size() == 1);
         assert(node.children[0].isExpr());
-        compileASTNode(node.children[0], instrStream);
+        compileASTNode(node.children[0], env, instrStream);
         break;
 
     case IgnoreValue:
         assert(node.children.size() == 1);
         assert(node.children[0].isExpr());
-        compileASTNode(node.children[0], instrStream);
-        // instrStream.instrs.emplace_back(Pop);
+        compileASTNode(node.children[0], env, instrStream);
+        instrStream.instrs.emplace_back(IPop);
         break;
 
     case Assignment:
+    {
         assert(node.children.size() == 1);
         assert(node.children[0].isExpr());
-        // instrStream.instrs.emplace_back(Global or Local);
-        compileASTNode(node.children[0], instrStream);
-        // instrStream.instrs.emplace_back(Assign);
+        const Definition& def = env.getDef(node.name, node.line);
+        errorAssert(def.type == DefGlobalVar || def.type == DefLocalVar, "Compile", "Cannot assign to function", node.line);
+        instrStream.instrs.emplace_back(def.type == DefGlobalVar ? IGlobal : ILocal, def.addr);
+        compileASTNode(node.children[0], env, instrStream);
+        instrStream.instrs.emplace_back(IStore);
         break;
+    }
 
     case IfThenElse:
+    {
         assert(node.children.size() % 2 == 1 && node.children.size() >= 3);
+        ValueT endOfIf = env.newLabel();
+        ValueT endOfThen;
         for (size_t i = 0; i < node.children.size(); ++i)
         {
             const ASTNode& child = node.children[i];
             if (i % 2 == 0 && i < node.children.size() - 1)
             {
                 assert(child.isExpr());
-                compileASTNode(child, instrStream);
-                // instrStream.instrs.emplace_back(JumpIfZero, END_OF_THEN);
+                endOfThen = env.newLabel();
+                compileASTNode(child, env, instrStream);
+                instrStream.instrs.emplace_back(IJzr, endOfThen);
             }
             else if (i % 2 == 1)
             {
                 assert(child.type == Body);
-                compileASTNode(child, instrStream);
-                // instrStream.instrs.emplace_back(Jump, END_OF_IF);
-                // set END_OF_THEN
+                compileASTNode(child, env, instrStream);
+                instrStream.instrs.emplace_back(IJmp, endOfIf);
+                env.setLabelAddr(endOfThen, instrStream.instrs.size());
             }
             else
             {
                 assert(child.type == Body);
-                compileASTNode(child, instrStream);
-                // set END_OF_IF
+                compileASTNode(child, env, instrStream);
+                env.setLabelAddr(endOfIf, instrStream.instrs.size());
             }
         }
         break;
+    }
 
     case WhileDo:
+    {
         assert(node.children.size() == 2);
         assert(node.children[0].isExpr());
         assert(node.children[1].type == Body);
-        // instrStream.instrs.emplace_back(Jump, COND_OF_WHILE);
-        // set START_OF_WHILE
-        compileASTNode(node.children[1], instrStream);
-        compileASTNode(node.children[0], instrStream);
-        // set COND_OF_WHILE
-        // instrStream.instrs.emplace_back(JumpIfNotZero, START_OF_WHILE);
+        ValueT condOfWhile = env.newLabel();
+        ValueT startOfWhile = env.newLabel();
+        instrStream.instrs.emplace_back(IJmp, condOfWhile);
+        env.setLabelAddr(startOfWhile, instrStream.instrs.size());
+        compileASTNode(node.children[1], env, instrStream);
+        compileASTNode(node.children[0], env, instrStream);
+        env.setLabelAddr(condOfWhile, instrStream.instrs.size());
+        instrStream.instrs.emplace_back(IJnz, startOfWhile);
         break;
+    }
 
     case ReturnVal:
         assert(node.children.size() == 1);
         assert(node.children[0].isExpr());
-        compileASTNode(node.children[0], instrStream);
-        // instrStream.instrs.emplace_back(Return);
+        compileASTNode(node.children[0], env, instrStream);
+        instrStream.instrs.emplace_back(IReturn);
         break;
 
     case Body:
-        // TODO: Handle variable defs
+    {
+        int numVars = 0;
+        env.pushScope();
         for (const ASTNode& child : node.children)
         {
             assert(!child.isExpr() && child.type != Body && child.type != Program);
             errorAssert(child.type != FunDef, "Compile", "Illegal nested function definition", child.line);
-            compileASTNode(child, instrStream);
+            compileASTNode(child, env, instrStream);
+            if (child.type == VarDef)
+            {
+                ++numVars;
+                env.defineVar(child.name, DefLocalVar, child.line);
+            }
         }
+        env.popScope();
+        std::fill_n(std::back_inserter(instrStream.instrs), numVars, Instr(IPop));
         break;
+    }
 
     case VarDef:
         assert(node.children.size() == 1);
         assert(node.children[0].isExpr());
-        // instrStream.instrs.emplace_back(Global or Local);
-        compileASTNode(node.children[0], instrStream);
+        compileASTNode(node.children[0], env, instrStream);
         break;
 
     case FunDef:
-        // TODO: Handle "param" defs
         assert(node.children.size() == 1);
         assert(node.children[0].type == Body);
-        compileASTNode(node.children[0], instrStream);
-        // instrStream.instrs.emplace_back(Push, 0);
-        // instrStream.instrs.emplace_back(Return);
+        env.pushFrame();
+        env.pushScope();
+        for (size_t i = 0; i < node.paramNames.size(); ++i)
+        {
+            env.defineVar(node.paramNames[i], DefLocalVar, node.line);
+        }
+        env.defineVar("(return address)", DefLocalVar, node.line);
+        env.defineVar("(dynamic link)", DefLocalVar, node.line);
+        compileASTNode(node.children[0], env, instrStream);
+        instrStream.instrs.emplace_back(IPush, 0);
+        instrStream.instrs.emplace_back(IReturn);
+        env.popScope();
+        env.popFrame();
         break;
 
     case Program:
-        // TODO: Handle variable and fun defs
+    {
+        env.pushFrame();
+        env.pushScope();
+
+        env.defineFun("read", env.newLabel(), 0, node.line);
+        env.defineFun("print", env.newLabel(), 1, node.line);
+        env.defineFun("exit", env.newLabel(), 1, node.line);
+
         for (const ASTNode& child : node.children)
         {
             assert(!child.isExpr() && child.type != Body && child.type != Program);
             errorAssert(child.type == VarDef || child.type == FunDef, "Compile", "Illegal statement outside function body", child.line);
-            compileASTNode(child, instrStream);
+            if (child.type == FunDef) env.defineFun(child.name, env.newLabel(), child.paramNames.size(), child.line);
         }
+
+        for (const ASTNode& child : node.children)
+        {
+            if (child.type == FunDef) continue;
+            compileASTNode(child, env, instrStream);
+            if (child.type == VarDef) env.defineVar(child.name, DefGlobalVar, child.line);
+        }
+
+        errorAssert(env.defs.find("main") != env.defs.end(), "Compile", "`main` must be defined", node.line);
+        const Definition& def = env.getDef("main", node.line);
+        errorAssert(def.type == DefFun, "Compile", "`main` must be a function", node.line);
+        errorAssert(def.params == 0, "Compile", "`main` must take no arguments", node.line);
+        instrStream.instrs.emplace_back(IAddr, def.addr);
+        instrStream.instrs.emplace_back(ICall, 0);
+        instrStream.instrs.emplace_back(IExit);
+
+        env.setLabelAddr(env.getDef("read", node.line).addr, instrStream.instrs.size());
+        instrStream.instrs.emplace_back(IRead);
+        instrStream.instrs.emplace_back(IReturn);
+
+        env.setLabelAddr(env.getDef("print", node.line).addr, instrStream.instrs.size());
+        instrStream.instrs.emplace_back(ILocal, 0);
+        instrStream.instrs.emplace_back(ILoad);
+        instrStream.instrs.emplace_back(IPrint);
+        instrStream.instrs.emplace_back(IPush, 0);
+        instrStream.instrs.emplace_back(IReturn);
+
+        env.setLabelAddr(env.getDef("exit", node.line).addr, instrStream.instrs.size());
+        instrStream.instrs.emplace_back(ILocal, 0);
+        instrStream.instrs.emplace_back(ILoad);
+        instrStream.instrs.emplace_back(IExit);
+        instrStream.instrs.emplace_back(IPush, 0);
+        instrStream.instrs.emplace_back(IReturn);
+
+        for (const ASTNode& child : node.children)
+        {
+            if (child.type != FunDef) continue;
+            env.setLabelAddr(env.getDef(child.name, child.line).addr, instrStream.instrs.size());
+            compileASTNode(child, env, instrStream);
+        }
+
+        for (Instr& instr : instrStream.instrs)
+        {
+            if (instr.type != IAddr && instr.type != IJmp && instr.type != IJzr && instr.type != IJnz) continue;
+            instr.arg = env.getLabelAddr(instr.arg);
+        }
+
         break;
     }
+    }
+}
+
+InstrStream compileProgram(const ASTNode& node)
+{
+    Env env;
+    InstrStream instrStream;
+    compileASTNode(node, env, instrStream);
+    return instrStream;
 }
 
 int main()
@@ -1098,8 +1385,8 @@ int main()
     std::cerr << "Parsed program:\n\n";
     astRoot.print(std::cerr);
 
-    InstrStream instrStream;
-    compileASTNode(astRoot, instrStream);
+    InstrStream instrStream = compileProgram(astRoot);
+    instrStream.print(std::cerr);
 
     return 0;
 }

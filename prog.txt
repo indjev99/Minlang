@@ -6,14 +6,18 @@ fun f(x, y) =
     if
         x > 4 && !(~x <= 4 || b < 3)
     then
+        print(b + a * x << y);
         return a * a;
+        a = b;
     elif
         1
     then
+        var x = 3;
         return y & 2 << 1 + x;
     else
         return y - 1;
     end
+    main();
 end
 
 fun main() =
@@ -21,8 +25,9 @@ fun main() =
     while
         x > 0
     do
+        var b = 7;
         x = f(x, (x + 1));
     end
-    x = input();
-    return 0;
+    x = read() + b;
+    return x;
 end

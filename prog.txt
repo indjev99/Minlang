@@ -1,33 +1,17 @@
-var b = 6;
+var cnt = inc(0);
 
-fun f(x, y) = 
-    var a = x + y * 2 / 3 - 1;
-    print(a);
-    if
-        x > 4 && !(~x <= 4 || b < 3)
-    then
-        print(b + a * x << y);
-        return a * a;
-        a = b;
-    elif
-        1
-    then
-        var x = 3;
-        return y & 2 << 1 + x;
-    else
-        return y - 1;
+fun inc(x) = 
+    if x % 2 == 0 then
+        cnt = cnt + x;
     end
-    main();
+    return cnt;
 end
 
 fun main() =
-    var x = 5 + 2 / -2 * +2;
-    while
-        x > 0
-    do
-        var b = 7;
-        x = f(x, (x + 1));
+    var i = 0;
+    while i < 10 do
+        var val = read();
+        print(inc(val));
     end
-    x = read() + b;
-    return x;
+    return cnt;
 end

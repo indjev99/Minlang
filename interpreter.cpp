@@ -889,6 +889,7 @@ ASTNode parseProgram(const TokenStream& tokenStream)
         {
             bool succ = popBody(nodeStack, line);
             ASTNode& last = nodeStack.back();
+            if (succ && last.type == IfThenElse && last.remaining == 1) last.addBody(ASTNode(Body, 0, line));
             errorAssert(succ && last.isComplete() && (last.type == IfThenElse || last.type == WhileDo || last.type == FunDef), "Parse", "Unexpected end", line);
             break;
         }
@@ -1001,6 +1002,7 @@ struct InstrStream
             std::cerr << i << ": ";
             instrs[i].print(std::cerr);
         }
+        std::cerr << "\n";
     }
 };
 
@@ -1039,14 +1041,14 @@ struct Env
     std::unordered_map<ValueT, ValueT> labelAddrs;
     ValueT currLabel = 0;
 
-    void pushFrame()
+    void pushFrame(ValueT params)
     {
-        frameOffsets.push_back(0);
+        frameOffsets.push_back(-params);
     }
 
-    void popFrame()
+    void popFrame(ValueT params)
     {
-        assert(frameOffsets.back() == 0);
+        assert(frameOffsets.back() == -params);
         frameOffsets.pop_back();
     }
 
@@ -1283,7 +1285,7 @@ void compileASTNode(const ASTNode& node, Env& env, InstrStream& instrStream)
     case FunDef:
         assert(node.children.size() == 1);
         assert(node.children[0].type == Body);
-        env.pushFrame();
+        env.pushFrame(node.paramNames.size());
         env.pushScope();
         for (size_t i = 0; i < node.paramNames.size(); ++i)
         {
@@ -1291,16 +1293,17 @@ void compileASTNode(const ASTNode& node, Env& env, InstrStream& instrStream)
         }
         env.defineVar("(return address)", DefLocalVar, node.line);
         env.defineVar("(dynamic link)", DefLocalVar, node.line);
+        env.defineVar("(stack pointer)", DefLocalVar, node.line);
         compileASTNode(node.children[0], env, instrStream);
         instrStream.instrs.emplace_back(IPush, 0);
         instrStream.instrs.emplace_back(IReturn);
         env.popScope();
-        env.popFrame();
+        env.popFrame(node.paramNames.size());
         break;
 
     case Program:
     {
-        env.pushFrame();
+        env.pushFrame(0);
         env.pushScope();
 
         env.defineFun("read", env.newLabel(), 0, node.line);
@@ -1373,6 +1376,238 @@ InstrStream compileProgram(const ASTNode& node)
     return instrStream;
 }
 
+ValueT safePopBack(std::vector<ValueT>& stack, ValueT pc)
+{
+    errorAssert(!stack.empty(), "Runtime", "Tried to pop from empty stack", pc);
+    ValueT back = stack.back();
+    stack.pop_back();
+    return back;
+}
+
+ValueT executeProgram(const InstrStream& instrStream, std::istream& in, std::ostream& out)
+{
+    ValueT pc = 0;
+    ValueT bp = 0;
+    std::vector<ValueT> stack;
+
+    while (pc >= 0 && pc < (ValueT) instrStream.instrs.size())
+    {
+        const Instr& instr = instrStream.instrs[pc];
+        switch (instr.type)
+        {
+        case IPush:
+            stack.push_back(instr.arg);
+            break;
+
+        case IPop:
+            safePopBack(stack, pc);
+            break;
+
+        case IBinOp:
+        {
+            ValueT right = stack.back();
+            stack.pop_back();
+            ValueT left = safePopBack(stack, pc);
+            switch (instr.arg)
+            {
+            case ArAdd:
+                stack.push_back(left + right);
+                break;
+
+            case ArSub:
+                stack.push_back(left - right);
+                break;
+
+            case ArMul:
+                stack.push_back(left * right);
+                break;
+
+            case ArDiv:
+                errorAssert(right != 0, "Runtime", "Division by 0", pc);
+                stack.push_back(left / right);
+                break;
+
+            case ArMod:
+                errorAssert(right != 0, "Runtime", "Modulo by 0", pc);
+                stack.push_back(left % right);
+                break;
+
+            case CmpEq:
+                stack.push_back(left == right);
+                break;
+
+            case CmpNeq:
+                stack.push_back(left != right);
+                break;
+
+            case CmpLt:
+                stack.push_back(left < right);
+                break;
+
+            case CmpGt:
+                stack.push_back(left > right);
+                break;
+
+            case CmpLeq:
+                stack.push_back(left <= right);
+                break;
+
+            case CmpGeq:
+                stack.push_back(left >= right);
+                break;
+
+            case LogAnd:
+                stack.push_back(left && right);
+                break;
+
+            case LogOr:
+                stack.push_back(left || right);
+                break;
+
+            case BitAnd:
+                stack.push_back(left & right);
+                break;
+
+            case BitOr:
+                stack.push_back(left | right);
+                break;
+
+            case BitXor:
+                stack.push_back(left ^ right);
+                break;
+
+            case BitLShift:
+                stack.push_back(left << right);
+                break;
+
+            case BitRShift:
+                stack.push_back(left >> right);
+                break;
+            }
+            break;
+        }
+
+        case IUnOp:
+        {
+            ValueT val = safePopBack(stack, pc);
+            switch (instr.arg)
+            {
+            case UnPlus:
+                stack.push_back(+val);
+                break;
+
+            case UnMinus:
+                stack.push_back(-val);
+                break;
+
+            case LogNot:
+                stack.push_back(!val);
+                break;
+
+            case BitNot:
+                stack.push_back(~val);
+                break;
+            }
+            break;
+        }
+
+        case IGlobal:
+            stack.push_back(instr.arg);
+            break;
+
+        case ILocal:
+            stack.push_back(bp + instr.arg);
+            break;
+
+        case ILoad:
+        {
+            ValueT ptr = safePopBack(stack, pc);
+            errorAssert(ptr >= 0 && ptr < (ValueT) stack.size(), "Runtime", "Loading from invalid pointer", pc);
+            stack.push_back(stack[ptr]);
+            break;
+        }
+
+        case IStore:
+        {
+            ValueT val = safePopBack(stack, pc);
+            ValueT ptr = safePopBack(stack, pc);
+            errorAssert(ptr >= 0 && ptr < (ValueT) stack.size(), "Runtime", "Storing to invalid pointer", pc);
+            stack[ptr] = val;
+            break;
+        }
+
+        case IJmp:
+            pc = instr.arg;
+            break;
+
+        case IJzr:
+        {
+            ValueT val = safePopBack(stack, pc);
+            if (val == 0) pc = instr.arg;
+            break;
+        }
+
+        case IJnz:
+        {
+            ValueT val = safePopBack(stack, pc);
+            if (val != 0) pc = instr.arg;
+            break;
+        }
+
+        case IAddr:
+            stack.push_back(instr.arg);
+            break;
+
+        case ICall:
+        {
+            ValueT newPc = safePopBack(stack, pc);
+            stack.push_back(pc);
+            stack.push_back(bp);
+            stack.push_back(stack.size() - instr.arg - 2);
+            pc = newPc;
+            bp = stack.size() - 3;
+            break;
+        }
+
+        case IReturn:
+        {
+            ValueT val = safePopBack(stack, pc);
+            ValueT oldBp = bp;
+            pc = stack[oldBp];
+            bp = stack[oldBp + 1];
+            errorAssert(stack[oldBp + 2] >= 0 && stack[oldBp + 2] <= (ValueT) stack.size(), "Runtime", "Invalid stack pointer", pc);
+            stack.resize(stack[oldBp + 2]);
+            stack.push_back(val);
+            break;
+        }
+
+        case IRead:
+            stack.push_back(0);
+            in >> stack.back();
+            break;
+
+        case IPrint:
+        {
+            ValueT val = safePopBack(stack, pc);
+            out << val << "\n";
+            break;
+        }
+
+        case IExit:
+        {
+            ValueT val = safePopBack(stack, pc);
+            return val;
+            break;
+        }
+        }
+
+        ++pc;
+    }
+
+    errorAssert(false, "Runtime", "Program counter went out of bounds", pc);
+    return 0;
+}
+
 int main()
 {
     TokenStream tokenStream = lexProgram(std::cin);
@@ -1389,6 +1624,11 @@ int main()
 
     std::cerr << "Compiled program:\n\n";
     instrStream.print(std::cerr);
+
+    ValueT retCode = executeProgram(instrStream, std::cin, std::cout);
+
+    std::cerr << "Executed program:\n\n";
+    std::cerr << retCode << "\n";
 
     return 0;
 }

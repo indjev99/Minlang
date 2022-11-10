@@ -12,6 +12,7 @@ fun main() =
     while i < 10 do
         var val = read();
         print(inc(val));
+        i = i + 1;
     end
     return cnt;
 end

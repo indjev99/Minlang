@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cassert>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <unordered_map>
@@ -984,10 +985,10 @@ struct Instr
 
     void print(std::ostream& out) const
     {
-        std::cerr << intrStrings.at(type);
+        out << intrStrings.at(type);
         if (type != IPop && type != ILoad && type != IStore && type != IReturn && type != IRead && type != IPrint && type != IExit)
-            std::cerr << " " << arg;
-        std::cerr << "\n";
+            out << " " << arg;
+        out << "\n";
     }
 };
 
@@ -999,10 +1000,10 @@ struct InstrStream
     {
         for (size_t i = 0; i < instrs.size(); ++i)
         {
-            std::cerr << i << ": ";
-            instrs[i].print(std::cerr);
+            out << i << ": ";
+            instrs[i].print(out);
         }
-        std::cerr << "\n";
+        out << "\n";
     }
 };
 
@@ -1243,8 +1244,8 @@ void compileASTNode(const ASTNode& node, Env& env, InstrStream& instrStream)
         instrStream.instrs.emplace_back(IJmp, condOfWhile);
         env.setLabelAddr(startOfWhile, instrStream.instrs.size());
         compileASTNode(node.children[1], env, instrStream);
-        compileASTNode(node.children[0], env, instrStream);
         env.setLabelAddr(condOfWhile, instrStream.instrs.size());
+        compileASTNode(node.children[0], env, instrStream);
         instrStream.instrs.emplace_back(IJnz, startOfWhile);
         break;
     }
@@ -1292,8 +1293,8 @@ void compileASTNode(const ASTNode& node, Env& env, InstrStream& instrStream)
             env.defineVar(node.paramNames[i], DefLocalVar, node.line);
         }
         env.defineVar("(return address)", DefLocalVar, node.line);
-        env.defineVar("(dynamic link)", DefLocalVar, node.line);
-        env.defineVar("(stack pointer)", DefLocalVar, node.line);
+        env.defineVar("(old base pointer)", DefLocalVar, node.line);
+        env.defineVar("(old stack pointer)", DefLocalVar, node.line);
         compileASTNode(node.children[0], env, instrStream);
         instrStream.instrs.emplace_back(IPush, 0);
         instrStream.instrs.emplace_back(IReturn);
@@ -1337,14 +1338,14 @@ void compileASTNode(const ASTNode& node, Env& env, InstrStream& instrStream)
         instrStream.instrs.emplace_back(IReturn);
 
         env.setLabelAddr(env.getDef("print", node.line).addr, instrStream.instrs.size());
-        instrStream.instrs.emplace_back(ILocal, 0);
+        instrStream.instrs.emplace_back(ILocal, -1);
         instrStream.instrs.emplace_back(ILoad);
         instrStream.instrs.emplace_back(IPrint);
         instrStream.instrs.emplace_back(IPush, 0);
         instrStream.instrs.emplace_back(IReturn);
 
         env.setLabelAddr(env.getDef("exit", node.line).addr, instrStream.instrs.size());
-        instrStream.instrs.emplace_back(ILocal, 0);
+        instrStream.instrs.emplace_back(ILocal, -1);
         instrStream.instrs.emplace_back(ILoad);
         instrStream.instrs.emplace_back(IExit);
         instrStream.instrs.emplace_back(IPush, 0);
@@ -1356,6 +1357,9 @@ void compileASTNode(const ASTNode& node, Env& env, InstrStream& instrStream)
             env.setLabelAddr(env.getDef(child.name, child.line).addr, instrStream.instrs.size());
             compileASTNode(child, env, instrStream);
         }
+
+        env.popScope();
+        env.popFrame(0);
 
         for (Instr& instr : instrStream.instrs)
         {
@@ -1393,6 +1397,8 @@ ValueT executeProgram(const InstrStream& instrStream, std::istream& in, std::ost
     while (pc >= 0 && pc < (ValueT) instrStream.instrs.size())
     {
         const Instr& instr = instrStream.instrs[pc];
+        ValueT nextPc = pc + 1;
+
         switch (instr.type)
         {
         case IPush:
@@ -1537,20 +1543,20 @@ ValueT executeProgram(const InstrStream& instrStream, std::istream& in, std::ost
         }
 
         case IJmp:
-            pc = instr.arg;
+            nextPc = instr.arg;
             break;
 
         case IJzr:
         {
             ValueT val = safePopBack(stack, pc);
-            if (val == 0) pc = instr.arg;
+            if (val == 0) nextPc = instr.arg;
             break;
         }
 
         case IJnz:
         {
             ValueT val = safePopBack(stack, pc);
-            if (val != 0) pc = instr.arg;
+            if (val != 0) nextPc = instr.arg;
             break;
         }
 
@@ -1560,12 +1566,13 @@ ValueT executeProgram(const InstrStream& instrStream, std::istream& in, std::ost
 
         case ICall:
         {
-            ValueT newPc = safePopBack(stack, pc);
-            stack.push_back(pc);
+            ValueT newNextPc = safePopBack(stack, pc);
+            ValueT newBp = stack.size();
+            stack.push_back(nextPc);
             stack.push_back(bp);
-            stack.push_back(stack.size() - instr.arg - 2);
-            pc = newPc;
-            bp = stack.size() - 3;
+            stack.push_back(newBp - instr.arg);
+            nextPc = newNextPc;
+            bp = newBp;
             break;
         }
 
@@ -1573,7 +1580,7 @@ ValueT executeProgram(const InstrStream& instrStream, std::istream& in, std::ost
         {
             ValueT val = safePopBack(stack, pc);
             ValueT oldBp = bp;
-            pc = stack[oldBp];
+            nextPc = stack[oldBp];
             bp = stack[oldBp + 1];
             errorAssert(stack[oldBp + 2] >= 0 && stack[oldBp + 2] <= (ValueT) stack.size(), "Runtime", "Invalid stack pointer", pc);
             stack.resize(stack[oldBp + 2]);
@@ -1601,16 +1608,22 @@ ValueT executeProgram(const InstrStream& instrStream, std::istream& in, std::ost
         }
         }
 
-        ++pc;
+        pc = nextPc;
     }
 
     errorAssert(false, "Runtime", "Program counter went out of bounds", pc);
     return 0;
 }
 
-int main()
+int main(int argc, char *argv[])
 {
-    TokenStream tokenStream = lexProgram(std::cin);
+    std::string fileName;
+    if (argc >= 2) fileName = argv[1];
+    else std::cin >> fileName;
+
+    std::ifstream file(fileName);
+
+    TokenStream tokenStream = lexProgram(file);
 
     std::cerr << "Lexed program:\n\n";
     tokenStream.print(std::cerr);
@@ -1625,9 +1638,11 @@ int main()
     std::cerr << "Compiled program:\n\n";
     instrStream.print(std::cerr);
 
+    std::cerr << "Program IO:\n\n";
+
     ValueT retCode = executeProgram(instrStream, std::cin, std::cout);
 
-    std::cerr << "Executed program:\n\n";
+    std::cerr << "\nProgram return code:\n\n";
     std::cerr << retCode << "\n";
 
     return 0;

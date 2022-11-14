@@ -115,6 +115,9 @@ const std::unordered_map<Operator, int> operatorPrec = {
     {BitRShift, 8}
 };
 
+const int minOperatorPrec = 0;
+const int maxOperatorPrec = 100;
+
 const std::unordered_set<Operator> binOperators = {
     ArAdd,
     ArSub,
@@ -153,6 +156,8 @@ enum TokenType
     Comma,
     LBrack,
     RBrack,
+    LSub,
+    RSub,
     If,
     Then,
     Elif,
@@ -172,6 +177,8 @@ const std::unordered_map<std::string, TokenType> tokenMap = {
     {",", Comma},
     {"(", LBrack},
     {")", RBrack},
+    {"[", LSub},
+    {"]", RSub},
     {"if", If},
     {"then", Then},
     {"elif", Elif},
@@ -190,6 +197,8 @@ const std::unordered_map<TokenType, std::string> tokenStrings = {
     {Comma, ","},
     {LBrack, "("},
     {RBrack, ")"},
+    {LSub, "["},
+    {RSub, "]"},
     {If, "if"},
     {Then, "then"},
     {Elif, "elif"},
@@ -356,6 +365,7 @@ enum ASTNodeType
     UnOperator,
     Application,
     Bracketed,
+    Subscript,
     IgnoreValue,
     Assignment,
     IfThenElse,
@@ -369,7 +379,12 @@ enum ASTNodeType
 
 bool isExpr(ASTNodeType type)
 {
-    return type == GetVar || type == ConstNumber || type == BinOperator || type == UnOperator || type == Application || type == Bracketed;
+    return type == GetVar || type == ConstNumber || type == BinOperator || type == UnOperator || type == Application || type == Bracketed || type == Subscript;
+}
+
+bool isStmt(ASTNodeType type)
+{
+    return type == IgnoreValue || type == Assignment || type == IfThenElse || type == WhileDo || type == ReturnVal || type == VarDef;
 }
 
 void printIndent(std::ostream& out, int indent)
@@ -423,6 +438,11 @@ struct ASTNode
         return ::isExpr(type);
     }
 
+    bool isStmt() const
+    {
+        return !isExpr() && type != Body && type != Program;
+    }
+
     bool isComplete() const
     {
         return remaining == 0;
@@ -432,7 +452,7 @@ struct ASTNode
     {
         return (
             ((type == UnOperator || type == Bracketed || type == IgnoreValue || type == Assignment || type == ReturnVal || type == VarDef) && remaining == 1)
-            || (type == BinOperator && (remaining == 2 || remaining == 1))
+            || ((type == BinOperator || type == Subscript) && (remaining == 2 || remaining == 1))
             || (type == Application && remaining == -1)
             || (type == IfThenElse && remaining == 3)
             || (type == WhileDo && remaining == 2)
@@ -455,26 +475,26 @@ struct ASTNode
 
     void addChild(ASTNode&& child)
     {
-        assert(remaining != 0);
+        assert(remaining != 0 && child.isComplete());
         if (remaining > 0) --remaining;
         children.emplace_back(std::move(child));
     }
 
     void addExpr(ASTNode&& expr)
     {
-        assert(needsExpr() && expr.isExpr() && expr.isComplete());
+        assert(needsExpr() && expr.isExpr());
         addChild(std::move(expr));
     }
 
     void addBody(ASTNode&& body)
     {
-        assert(needsBody() && body.type == Body && body.isComplete());
+        assert(needsBody() && body.type == Body);
         addChild(std::move(body));
     }
 
     void addStmt(ASTNode&& stmt)
     {
-        assert(needsStmt() && !stmt.isExpr() && stmt.type != Body && stmt.type != Program);
+        assert(needsStmt() && stmt.isStmt());
         addChild(std::move(stmt));
     }
 
@@ -751,16 +771,17 @@ ASTNode parseProgram(const TokenStream& tokenStream)
         {
             auto itBin = binOperators.find(token.oper);
             auto itUn = unOperators.find(token.oper);
+            assert(itBin != binOperators.end() || itUn != unOperators.end());
             bool okBin = last.isComplete() && last.isExpr();
             bool okUn = !okBin;
             errorAssert(itUn != unOperators.end() || okBin, "Parse", "Unexpected binary operator", line);
             errorAssert(itBin != binOperators.end() || okUn, "Parse", "Unexpected unary operator", line);
             if (itUn != unOperators.end() && okUn) nodeStack.emplace_back(UnOperator, itUn->second, 1, line);
-            else
+            else if (itBin != binOperators.end() && okBin)
             {
                 ASTNode left = popOperators(nodeStack, operatorPrec.at(token.oper), line);
                 assert(!left.isEmptyNode());
-                nodeStack.emplace_back(BinOperator, token.oper, 2, left.line);
+                nodeStack.emplace_back(BinOperator, token.oper, 2, line);
                 nodeStack.back().addExpr(std::move(left));
             }
             break;
@@ -778,7 +799,7 @@ ASTNode parseProgram(const TokenStream& tokenStream)
 
         case Semicol:
         {
-            ASTNode expr = popOperators(nodeStack, 0, line);
+            ASTNode expr = popOperators(nodeStack, minOperatorPrec, line);
             ASTNode& last = nodeStack.back();
             errorAssert(
                 !expr.isEmptyNode() &&
@@ -797,7 +818,7 @@ ASTNode parseProgram(const TokenStream& tokenStream)
 
         case Comma:
         {
-            ASTNode expr = popOperators(nodeStack, 0, line);
+            ASTNode expr = popOperators(nodeStack, minOperatorPrec, line);
             ASTNode& last = nodeStack.back();
             errorAssert(!expr.isEmptyNode() && !last.isComplete() && last.type == Application, "Parse", "Unexpected comma", line);
             last.addExpr(std::move(expr));
@@ -825,19 +846,37 @@ ASTNode parseProgram(const TokenStream& tokenStream)
                 break;
             }
 
-            ASTNode expr = popOperators(nodeStack, 0, line);
+            ASTNode expr = popOperators(nodeStack, minOperatorPrec, line);
             ASTNode& last = nodeStack.back();
-            errorAssert(!expr.isEmptyNode() && !last.isComplete() && (last.type == Bracketed || last.type == Application), "Parse", "Unmatched closing bracket", line);
+            errorAssert(!expr.isEmptyNode() && !last.isComplete() && (last.type == Bracketed || last.type == Application), "Parse", "Unexpected closing bracket", line);
             if (last.type == Bracketed)
             {
                 nodeStack.pop_back();
                 nodeStack.emplace_back(std::move(expr));
             }
-            else
+            else if (last.type == Application)
             {
                 last.addExpr(std::move(expr));
                 last.remaining = 0;
             }
+            break;
+        }
+
+        case LSub:
+        {
+            ASTNode expr = popOperators(nodeStack, maxOperatorPrec, line);
+            errorAssert(!expr.isEmptyNode(), "Parse", "Unexpected opening square bracket", line);
+            nodeStack.emplace_back(Subscript, 2, line);
+            nodeStack.back().addExpr(std::move(expr));
+            break;
+        }
+
+        case RSub:
+        {
+            ASTNode expr = popOperators(nodeStack, minOperatorPrec, line);
+            ASTNode& last = nodeStack.back();
+            errorAssert(!expr.isEmptyNode() && !last.isComplete() && last.type == Subscript, "Parse", "Unexpected closing square", line);
+            last.addExpr(std::move(expr));
             break;
         }
 
@@ -848,7 +887,7 @@ ASTNode parseProgram(const TokenStream& tokenStream)
 
         case Then:
         {
-            ASTNode expr = popOperators(nodeStack, 0, line);
+            ASTNode expr = popOperators(nodeStack, minOperatorPrec, line);
             ASTNode& last = nodeStack.back();
             errorAssert(!expr.isEmptyNode() && last.remaining == 3 && last.type == IfThenElse, "Parse", "Unexpected then", line);
             last.addExpr(std::move(expr));
@@ -879,7 +918,7 @@ ASTNode parseProgram(const TokenStream& tokenStream)
 
         case Do:
         {
-            ASTNode expr = popOperators(nodeStack, 0, line);
+            ASTNode expr = popOperators(nodeStack, minOperatorPrec, line);
             ASTNode& last = nodeStack.back();
             errorAssert(!expr.isEmptyNode() && last.remaining == 2 && last.type == WhileDo, "Parse", "Unexpected do", line);
             last.addExpr(std::move(expr));
@@ -922,6 +961,9 @@ ASTNode parseProgram(const TokenStream& tokenStream)
             last.remaining = 0;
             break;
         }
+
+        default:
+            errorAssert(false, "Parse", "Unsupported token type", line);
         }
     }
 

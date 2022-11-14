@@ -1,18 +1,10 @@
-var cnt = inc(0);
-
-fun inc(x) = 
-    if x % 2 == 0 then
-        cnt = cnt + x;
-    end
-    return cnt;
-end
-
 fun main() =
-    var i = 0;
-    while i < 10 do
-        var val = read();
-        print(inc(val));
-        i = i + 1;
-    end
-    return cnt;
+    var n = 5;
+    var arr = alloc(10);
+    arr[0] = 1;
+    arr[1] = 2;
+    n = arr[0];
+    arr[2] = arr[1];
+    arr = arr[2];
+    n = arr;
 end

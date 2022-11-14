@@ -1,21 +1,34 @@
-fun main() =
-    var n = read();
-    var arr = alloc(n);
+fun readArr(arr, n) =
     var i = 0;
     while i < n do
         arr[i] = read();
         i = i + 1;
     end
-    i = 0;
+end
+
+fun printArr(arr, n) =
+    var i = 0;
+    while i < n do
+        print(arr[i]);
+        i = i + 1;
+    end
+end
+
+fun reverseArr(arr, n) =
+    var i = 0;
     while i < n / 2 do
         var temp = arr[i];
         arr[i] = arr[n - i - 1];
         arr[n - i - 1] = temp;
         i = i + 1;
     end
-    i = 0;
-    while i < n do
-        print(arr[i]);
-        i = i + 1;
-    end
+end
+
+fun main() =
+    var n = read();
+    var arr = alloc(n);
+    readArr(arr, n);
+    reverseArr(arr, n);
+    printArr(arr, n);
+    free(arr);
 end

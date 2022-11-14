@@ -42,4 +42,4 @@ Primive functions:
 - `read()`
 - `print(x)`
 - `flush()`
-- `exit(code)`.`
+- `exit(code)`

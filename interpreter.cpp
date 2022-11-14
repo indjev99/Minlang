@@ -1538,22 +1538,25 @@ const ValueT STACK_SIZE = 8 * 1024 * 1024;
 ValueT executeProgram(const InstrStream& instrStream, std::istream& in, std::ostream& out)
 {
     static_assert(sizeof(ValueT) == sizeof(ValueT*));
-
-    ValueT pc = 0;
-    ValueT bp = 0;
-    ValueT sp = 0;
+    static_assert(sizeof(ValueT) == sizeof(const Instr*));
 
     std::unique_ptr<ValueT[]> stack = std::make_unique<ValueT[]>(STACK_SIZE);
+    
+    const Instr* pcStart = instrStream.instrs.data();
+    const Instr* pc = pcStart;
 
-    while (pc >= 0 && pc < (ValueT) instrStream.instrs.size())
+    ValueT* gp = stack.get();
+    ValueT* bp = stack.get();
+    ValueT* sp = stack.get();
+
+    while (true)
     {
-        const Instr& instr = instrStream.instrs[pc];
-        ValueT nextPc = pc + 1;
+        const Instr& instr = *pc++;
 
         switch (instr.type)
         {
         case IPush:
-            stack[sp++] = instr.arg;
+            *sp++ = instr.arg;
             break;
 
         case IPop:
@@ -1562,206 +1565,204 @@ ValueT executeProgram(const InstrStream& instrStream, std::istream& in, std::ost
 
         case IBinOp:
         {
-            ValueT right = stack[--sp];
-            ValueT left = stack[--sp];
+            ValueT right = *--sp;
+            ValueT left = *--sp;
             switch (instr.arg)
             {
             case ArAdd:
-                stack[sp++] = left + right;
+                *sp++ = left + right;
                 break;
 
             case ArSub:
-                stack[sp++] = left - right;
+                *sp++ = left - right;
                 break;
 
             case ArMul:
-                stack[sp++] = left * right;
+                *sp++ = left * right;
                 break;
 
             case ArDiv:
-                errorAssert(right != 0, "Runtime", "Division by 0", pc);
-                stack[sp++] = left / right;
+                *sp++ = left / right;
                 break;
 
             case ArMod:
-                errorAssert(right != 0, "Runtime", "Modulo by 0", pc);
-                stack[sp++] = left % right;
+                *sp++ = left % right;
                 break;
 
             case CmpEq:
-                stack[sp++] = left == right;
+                *sp++ = left == right;
                 break;
 
             case CmpNeq:
-                stack[sp++] = left != right;
+                *sp++ = left != right;
                 break;
 
             case CmpLt:
-                stack[sp++] = left < right;
+                *sp++ = left < right;
                 break;
 
             case CmpGt:
-                stack[sp++] = left > right;
+                *sp++ = left > right;
                 break;
 
             case CmpLeq:
-                stack[sp++] = left <= right;
+                *sp++ = left <= right;
                 break;
 
             case CmpGeq:
-                stack[sp++] = left >= right;
+                *sp++ = left >= right;
                 break;
 
             case LogAnd:
-                stack[sp++] = left && right;
+                *sp++ = left && right;
                 break;
 
             case LogOr:
-                stack[sp++] = left || right;
+                *sp++ = left || right;
                 break;
 
             case BitAnd:
-                stack[sp++] = left & right;
+                *sp++ = left & right;
                 break;
 
             case BitOr:
-                stack[sp++] = left | right;
+                *sp++ = left | right;
                 break;
 
             case BitXor:
-                stack[sp++] = left ^ right;
+                *sp++ = left ^ right;
                 break;
 
             case BitLShift:
-                stack[sp++] = left << right;
+                *sp++ = left << right;
                 break;
 
             case BitRShift:
-                stack[sp++] = left >> right;
+                *sp++ = left >> right;
                 break;
 
             default:
-                errorAssert(false, "Runtime", "Unsupported binary operator", pc);
+                errorAssert(false, "Runtime", "Unsupported binary operator", pc - pcStart - 1);
             }
             break;
         }
 
         case IUnOp:
         {
-            ValueT val = stack[--sp];
+            ValueT val = *--sp;
             switch (instr.arg)
             {
             case UnPlus:
-                stack[sp++] = +val;
+                *sp++ = +val;
                 break;
 
             case UnMinus:
-                stack[sp++] = -val;
+                *sp++ = -val;
                 break;
 
             case LogNot:
-                stack[sp++] = !val;
+                *sp++ = !val;
                 break;
 
             case BitNot:
-                stack[sp++] = ~val;
+                *sp++ = ~val;
                 break;
 
             default:
-                errorAssert(false, "Runtime", "Unsupported unary operator", pc);
+                errorAssert(false, "Runtime", "Unsupported unary operator", pc - pcStart - 1);
             }
             break;
         }
 
         case IGlobal:
-            stack[sp++] = reinterpret_cast<ValueT>(stack.get() + instr.arg);
+            *sp++ = reinterpret_cast<ValueT>(gp + instr.arg);
             break;
 
         case ILocal:
-            stack[sp++] = reinterpret_cast<ValueT>(stack.get() + bp + instr.arg);
+            *sp++ = reinterpret_cast<ValueT>(bp + instr.arg);
             break;
 
         case ILoad:
         {
-            ValueT ptr = stack[--sp];
-            stack[sp++] = *reinterpret_cast<ValueT*>(ptr);
+            ValueT ptr = *--sp;
+            *sp++ = *reinterpret_cast<ValueT*>(ptr);
             break;
         }
 
         case IStore:
         {
-            ValueT val = stack[--sp];
-            ValueT ptr = stack[--sp];
+            ValueT val = *--sp;
+            ValueT ptr = *--sp;
             *reinterpret_cast<ValueT*>(ptr) = val;
             break;
         }
 
         case IJmp:
-            nextPc = instr.arg;
+            pc = pcStart + instr.arg;
             break;
 
         case IJzr:
         {
-            ValueT val = stack[--sp];
-            if (val == 0) nextPc = instr.arg;
+            ValueT val = *--sp;
+            if (val == 0) pc = pcStart + instr.arg;
             break;
         }
 
         case IJnz:
         {
-            ValueT val = stack[--sp];
-            if (val != 0) nextPc = instr.arg;
+            ValueT val = *--sp;
+            if (val != 0) pc = pcStart + instr.arg;
             break;
         }
 
         case IAddr:
-            stack[sp++] = instr.arg;
+            *sp++ = reinterpret_cast<ValueT>(pcStart + instr.arg);
             break;
 
         case ICall:
         {
-            ValueT newNextPc = stack[--sp];
-            ValueT newBp = sp;
-            stack[sp++] = nextPc;
-            stack[sp++] = bp;
-            stack[sp++] = newBp - instr.arg;
-            nextPc = newNextPc;
+            const Instr* newPc = reinterpret_cast<const Instr*>(*--sp);
+            ValueT* newBp = reinterpret_cast<ValueT*>(sp);
+            *sp++ = reinterpret_cast<ValueT>(pc);
+            *sp++ = reinterpret_cast<ValueT>(bp);
+            *sp++ = reinterpret_cast<ValueT>(newBp - instr.arg);
+            pc = newPc;
             bp = newBp;
             break;
         }
 
         case IReturn:
         {
-            ValueT val = stack[--sp];
-            ValueT oldBp = bp;
-            nextPc = stack[oldBp];
-            bp = stack[oldBp + 1];
-            sp = stack[oldBp + 2];
-            stack[sp++] = val;
+            ValueT val = *--sp;
+            ValueT* oldBp = reinterpret_cast<ValueT*>(bp);
+            pc = reinterpret_cast<const Instr*>(oldBp[0]);
+            bp = reinterpret_cast<ValueT*>(oldBp[1]);
+            sp = reinterpret_cast<ValueT*>(oldBp[2]);
+            *sp++ = val;
             break;
         }
 
         case IAlloc:
         {
-            ValueT len = stack[--sp];
-            stack[sp++] = reinterpret_cast<ValueT>(new ValueT[len]);
+            ValueT len = *--sp;
+            *sp++ = reinterpret_cast<ValueT>(new ValueT[len]);
             break;
         }
 
         case IFree:
         {
-            ValueT ptr = stack[--sp];
+            ValueT ptr = *--sp;
             delete[] reinterpret_cast<ValueT*>(ptr);
             break;
         }
 
         case IRead:
-            in >> stack[sp++];
+            in >> *sp++;
             break;
 
         case IPrint:
         {
-            out << stack[--sp] << "\n";
+            out << *--sp << "\n";
             break;
         }
 
@@ -1772,19 +1773,14 @@ ValueT executeProgram(const InstrStream& instrStream, std::istream& in, std::ost
         case IExit:
         {
             out << std::flush;
-            return stack[--sp];
+            return *--sp;
             break;
         }
 
         default:
-            errorAssert(false, "Runtime", "Unsupported instruction type", pc);
+            errorAssert(false, "Runtime", "Unsupported instruction type", pc - pcStart - 1);
         }
-
-        pc = nextPc;
     }
-
-    errorAssert(false, "Runtime", "Program counter went out of bounds", pc);
-    return 0;
 }
 
 int main(int argc, char *argv[])

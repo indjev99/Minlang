@@ -1,18 +1,21 @@
 fun main() =
-    var n = 5;
-    print(n);
-    var arr = alloc(10);
-    print(n);
-    arr[0] = 1;
-    print(n);
-    arr[1] = 2;
-    print(n);
-    n = arr[0];
-    print(n);
-    arr[2] = arr[1];
-    print(n);
-    arr = arr[2];
-    print(n);
-    n = arr;
-    print(n);
+    var n = read();
+    var arr = alloc(n);
+    var i = 0;
+    while i < n do
+        arr[i] = read();
+        i = i + 1;
+    end
+    i = 0;
+    while i < n / 2 do
+        var temp = arr[i];
+        arr[i] = arr[n - i - 1];
+        arr[n - i - 1] = temp;
+        i = i + 1;
+    end
+    i = 0;
+    while i < n do
+        print(arr[i]);
+        i = i + 1;
+    end
 end

@@ -320,6 +320,7 @@ TokenStream lexProgram(std::istream& in)
     int line = 1;
     std::string curr = "";
     SymbolSet currSymbSet = ANY;
+    bool comment = false;
 
     TokenStream tokenStream;
 
@@ -327,8 +328,11 @@ TokenStream lexProgram(std::istream& in)
     {
         char c = in.get();
 
+        if (c == '#') comment = true;
+        else if (c == '\n') comment = false;
+
         SymbolSet cSet;
-        if (isspace(c)) cSet = SPACE;
+        if (comment || isspace(c)) cSet = SPACE;
         else if (c == '_' || isalpha(c)) cSet = WORD; 
         else if (isdigit(c)) cSet = currSymbSet == WORD ? WORD : NUMBER;
         else cSet = OPERATOR;
@@ -1411,6 +1415,9 @@ void compileASTNode(const ASTNode& node, Env& env, InstrStream& instrStream)
 
         break;
     }
+
+    default:
+        errorAssert(false, "Compile", "Unsupported node type", node.line);
     }
 }
 

@@ -5,7 +5,7 @@ All values are signed 64 bit intergers that can also be interpreted as pointers.
 Grammar:
 
 ```
-PROGRAM ::= (VAD_DEF | FUN_DEF)*
+PROGRAM ::= (VAR_DEF | FUN_DEF)*
 
 VAR_DEF ::= var NAME = EXPR;
 

@@ -2,6 +2,7 @@
 #include <cassert>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -381,6 +382,11 @@ enum ASTNodeType
     Program
 };
 
+bool isAddrExpr(ASTNodeType type)
+{
+    return type == GetVar || type == Subscript;
+}
+
 bool isExpr(ASTNodeType type)
 {
     return type == GetVar || type == ConstNumber || type == BinOperator || type == UnOperator || type == Application || type == Bracketed || type == Subscript;
@@ -388,7 +394,17 @@ bool isExpr(ASTNodeType type)
 
 bool isStmt(ASTNodeType type)
 {
-    return type == IgnoreValue || type == Assignment || type == IfThenElse || type == WhileDo || type == ReturnVal || type == VarDef;
+    return type == IgnoreValue || type == Assignment || type == IfThenElse || type == WhileDo || type == ReturnVal || type == VarDef || type == FunDef;
+}
+
+bool isBody(ASTNodeType type)
+{
+    return type == Body;
+}
+
+bool isProgram(ASTNodeType type)
+{
+    return type == Program;
 }
 
 void printIndent(std::ostream& out, int indent)
@@ -437,6 +453,11 @@ struct ASTNode
         , line(line)
     {}
 
+    bool isAddrExpr() const
+    {
+        return ::isAddrExpr(type);
+    }
+
     bool isExpr() const
     {
         return ::isExpr(type);
@@ -444,7 +465,17 @@ struct ASTNode
 
     bool isStmt() const
     {
-        return !isExpr() && type != Body && type != Program;
+        return ::isStmt(type);
+    }
+
+    bool isBody() const
+    {
+        return ::isBody(type);
+    }
+
+    bool isProgram() const
+    {
+        return ::isProgram(type);
     }
 
     bool isComplete() const
@@ -455,8 +486,8 @@ struct ASTNode
     bool needsExpr() const
     {
         return (
-            ((type == UnOperator || type == Bracketed || type == IgnoreValue || type == Assignment || type == ReturnVal || type == VarDef) && remaining == 1)
-            || ((type == BinOperator || type == Subscript) && (remaining == 2 || remaining == 1))
+            ((type == UnOperator || type == Bracketed || type == IgnoreValue || type == ReturnVal || type == VarDef) && remaining == 1)
+            || ((type == BinOperator || type == Subscript || type == Assignment) && (remaining == 2 || remaining == 1))
             || (type == Application && remaining == -1)
             || (type == IfThenElse && remaining == 3)
             || (type == WhileDo && remaining == 2)
@@ -490,16 +521,16 @@ struct ASTNode
         addChild(std::move(expr));
     }
 
-    void addBody(ASTNode&& body)
-    {
-        assert(needsBody() && body.type == Body);
-        addChild(std::move(body));
-    }
-
     void addStmt(ASTNode&& stmt)
     {
         assert(needsStmt() && stmt.isStmt());
         addChild(std::move(stmt));
+    }
+
+    void addBody(ASTNode&& body)
+    {
+        assert(needsBody() && body.isBody());
+        addChild(std::move(body));
     }
 
     bool isEmptyNode() const
@@ -550,6 +581,13 @@ struct ASTNode
             out << ")";
             break;
 
+        case Subscript:
+            if (children.size() > 0) children[0].print(out, indent + 1);
+            out << "[";
+            if (children.size() > 1) children[1].print(out, indent + 1);
+            out << "]";
+            break;
+
         case IgnoreValue:
             printIndent(out, indent);
             if (children.size() > 0) children[0].print(out, indent + 1);
@@ -558,8 +596,9 @@ struct ASTNode
 
         case Assignment:
             printIndent(out, indent);
-            out << name << " = ";
             if (children.size() > 0) children[0].print(out, indent + 1);
+            out << " = ";
+            if (children.size() > 1) children[1].print(out, indent + 1);
             out << ";" << "\n";
             break;
 
@@ -655,6 +694,9 @@ struct ASTNode
             }
             out << "\n";
             break;
+
+        default:
+            assert(false);
         }
     }
 };
@@ -783,21 +825,22 @@ ASTNode parseProgram(const TokenStream& tokenStream)
             if (itUn != unOperators.end() && okUn) nodeStack.emplace_back(UnOperator, itUn->second, 1, line);
             else if (itBin != binOperators.end() && okBin)
             {
-                ASTNode left = popOperators(nodeStack, operatorPrec.at(token.oper), line);
-                assert(!left.isEmptyNode());
+                ASTNode expr = popOperators(nodeStack, operatorPrec.at(token.oper), line);
+                assert(!expr.isEmptyNode());
                 nodeStack.emplace_back(BinOperator, token.oper, 2, line);
-                nodeStack.back().addExpr(std::move(left));
+                nodeStack.back().addExpr(std::move(expr));
             }
             break;
         }
 
         case Assign:
         {
-            errorAssert(last.type == GetVar, "Parse", "Unexpected assignment", line);
-            ASTNode& prev = nodeStack[nodeStack.size() - 2];
-            errorAssert(!prev.isExpr() && (prev.isComplete() || prev.needsBody()), "Parse", "Unexpected assignment", line);
-            last.type = Assignment;
-            last.remaining = 1;
+            ASTNode expr = popOperators(nodeStack, maxOperatorPrec, line);
+            errorAssert(!expr.isEmptyNode() && expr.isAddrExpr(), "Parse", "Unexpected assignment", line);
+            ASTNode& last = nodeStack.back();
+            errorAssert(!last.isExpr() && (last.isComplete() || last.needsBody()), "Parse", "Unexpected assignment", line);
+            nodeStack.emplace_back(Assignment, 2, line);
+            nodeStack.back().addExpr(std::move(expr));
             break;
         }
 
@@ -990,8 +1033,11 @@ enum InstrType
     IAddr,
     ICall,
     IReturn,
+    IAlloc,
+    IFree,
     IRead,
     IPrint,
+    IFlush,
     IExit
 };
 
@@ -1010,10 +1056,18 @@ std::unordered_map<InstrType, std::string> intrStrings = {
     {IAddr, "addr"},
     {ICall, "call"},
     {IReturn, "return"},
+    {IAlloc, "alloc"},
+    {IFree, "free"},
     {IRead, "read"},
     {IPrint, "print"},
+    {IFlush, "flush"},
     {IExit, "exit"}
 };
+
+bool hasArg(InstrType type)
+{
+    return type == IPush || type == IBinOp || type == IUnOp || type == IGlobal || type == ILocal || type == IJmp || type == IJzr || type == IJnz || type == IAddr || type == ICall;
+}
 
 struct Instr
 {
@@ -1032,8 +1086,7 @@ struct Instr
     void print(std::ostream& out) const
     {
         out << intrStrings.at(type);
-        if (type != IPop && type != ILoad && type != IStore && type != IReturn && type != IRead && type != IPrint && type != IExit)
-            out << " " << arg;
+        if (hasArg(type)) out << " " << arg;
         out << "\n";
     }
 };
@@ -1158,9 +1211,14 @@ struct Env
     }
 };
 
-void compileASTNode(const ASTNode& node, Env& env, InstrStream& instrStream)
+void compileAddrExpr(const ASTNode& node, Env& env, InstrStream& instrStream);
+void compileExpr(const ASTNode& node, Env& env, InstrStream& instrStream);
+void compileStmt(const ASTNode& node, Env& env, InstrStream& instrStream);
+void compileBody(const ASTNode& node, Env& env, InstrStream& instrStream);
+
+void compileAddrExpr(const ASTNode& node, Env& env, InstrStream& instrStream)
 {
-    assert(node.isComplete());
+    assert(node.isAddrExpr() && node.isComplete());
 
     switch (node.type)
     {
@@ -1170,10 +1228,38 @@ void compileASTNode(const ASTNode& node, Env& env, InstrStream& instrStream)
         const Definition& def = env.getDef(node.name, node.line);
         errorAssert(def.type == DefGlobalVar || def.type == DefLocalVar, "Compile", "Cannot get value of function", node.line);
         instrStream.instrs.emplace_back(def.type == DefGlobalVar ? IGlobal : ILocal, def.addr);
-        instrStream.instrs.emplace_back(ILoad);
         break;
     }
 
+    case Subscript:
+        assert(node.children.size() == 2);
+        assert(node.children[0].isExpr());
+        assert(node.children[1].isExpr());
+        compileExpr(node.children[0], env, instrStream);
+        compileExpr(node.children[1], env, instrStream);
+        instrStream.instrs.emplace_back(IPush, sizeof(ValueT));
+        instrStream.instrs.emplace_back(IBinOp, ArMul);
+        instrStream.instrs.emplace_back(IBinOp, ArAdd);
+        break;
+
+    default:
+        errorAssert(false, "Compile", "Unsupported node type", node.line);
+    }
+}
+
+void compileExpr(const ASTNode& node, Env& env, InstrStream& instrStream)
+{
+    assert(node.isExpr() && node.isComplete());
+
+    if (node.isAddrExpr())
+    {
+        compileAddrExpr(node, env, instrStream);
+        instrStream.instrs.emplace_back(ILoad);
+        return;
+    }
+
+    switch (node.type)
+    {
     case ConstNumber:
         assert(node.children.empty());
         instrStream.instrs.emplace_back(IPush, node.number);
@@ -1187,16 +1273,16 @@ void compileASTNode(const ASTNode& node, Env& env, InstrStream& instrStream)
         {
             ValueT endOfSecond = env.newLabel();
             instrStream.instrs.emplace_back(IPush, node.oper == LogAnd ? 0 : 1);
-            compileASTNode(node.children[0], env, instrStream);
+            compileExpr(node.children[0], env, instrStream);
             instrStream.instrs.emplace_back(node.oper == LogAnd ? IJzr : IJnz, endOfSecond);
             instrStream.instrs.emplace_back(IUnOp, LogNot);
-            compileASTNode(node.children[1], env, instrStream);
+            compileExpr(node.children[1], env, instrStream);
             env.setLabelAddr(endOfSecond, instrStream.instrs.size());
         }
         else
         {
-            compileASTNode(node.children[0], env, instrStream);
-            compileASTNode(node.children[1], env, instrStream);
+            compileExpr(node.children[0], env, instrStream);
+            compileExpr(node.children[1], env, instrStream);
         }
         instrStream.instrs.emplace_back(IBinOp, node.oper);
         break;
@@ -1204,7 +1290,7 @@ void compileASTNode(const ASTNode& node, Env& env, InstrStream& instrStream)
     case UnOperator:
         assert(node.children.size() == 1);
         assert(node.children[0].isExpr());
-        compileASTNode(node.children[0], env, instrStream);
+        compileExpr(node.children[0], env, instrStream);
         instrStream.instrs.emplace_back(IUnOp, node.oper);
         break;
 
@@ -1216,37 +1302,39 @@ void compileASTNode(const ASTNode& node, Env& env, InstrStream& instrStream)
         for (const ASTNode& child : node.children)
         {
             assert(child.isExpr());
-            compileASTNode(child, env, instrStream);
+            compileExpr(child, env, instrStream);
         }
         instrStream.instrs.emplace_back(IAddr, def.addr);
         instrStream.instrs.emplace_back(ICall, node.children.size());
         break;
     }
 
-    case Bracketed:
-        assert(node.children.size() == 1);
-        assert(node.children[0].isExpr());
-        compileASTNode(node.children[0], env, instrStream);
-        break;
+    default:
+        errorAssert(false, "Compile", "Unsupported node type", node.line);
+    }
+}
 
+void compileStmt(const ASTNode& node, Env& env, InstrStream& instrStream)
+{
+    assert(node.isStmt() && node.isComplete());
+
+    switch (node.type)
+    {
     case IgnoreValue:
         assert(node.children.size() == 1);
         assert(node.children[0].isExpr());
-        compileASTNode(node.children[0], env, instrStream);
+        compileExpr(node.children[0], env, instrStream);
         instrStream.instrs.emplace_back(IPop);
         break;
 
     case Assignment:
-    {
-        assert(node.children.size() == 1);
-        assert(node.children[0].isExpr());
-        const Definition& def = env.getDef(node.name, node.line);
-        errorAssert(def.type == DefGlobalVar || def.type == DefLocalVar, "Compile", "Cannot assign to function", node.line);
-        instrStream.instrs.emplace_back(def.type == DefGlobalVar ? IGlobal : ILocal, def.addr);
-        compileASTNode(node.children[0], env, instrStream);
+        assert(node.children.size() == 2);
+        assert(node.children[0].isAddrExpr());
+        assert(node.children[1].isExpr());
+        compileAddrExpr(node.children[0], env, instrStream);
+        compileExpr(node.children[1], env, instrStream);
         instrStream.instrs.emplace_back(IStore);
         break;
-    }
 
     case IfThenElse:
     {
@@ -1260,20 +1348,20 @@ void compileASTNode(const ASTNode& node, Env& env, InstrStream& instrStream)
             {
                 assert(child.isExpr());
                 endOfThen = env.newLabel();
-                compileASTNode(child, env, instrStream);
+                compileExpr(child, env, instrStream);
                 instrStream.instrs.emplace_back(IJzr, endOfThen);
             }
             else if (i % 2 == 1)
             {
-                assert(child.type == Body);
-                compileASTNode(child, env, instrStream);
+                assert(child.isBody());
+                compileBody(child, env, instrStream);
                 instrStream.instrs.emplace_back(IJmp, endOfIf);
                 env.setLabelAddr(endOfThen, instrStream.instrs.size());
             }
             else
             {
-                assert(child.type == Body);
-                compileASTNode(child, env, instrStream);
+                assert(child.isBody());
+                compileBody(child, env, instrStream);
                 env.setLabelAddr(endOfIf, instrStream.instrs.size());
             }
         }
@@ -1284,14 +1372,14 @@ void compileASTNode(const ASTNode& node, Env& env, InstrStream& instrStream)
     {
         assert(node.children.size() == 2);
         assert(node.children[0].isExpr());
-        assert(node.children[1].type == Body);
+        assert(node.children[1].isBody());
         ValueT condOfWhile = env.newLabel();
         ValueT startOfWhile = env.newLabel();
         instrStream.instrs.emplace_back(IJmp, condOfWhile);
         env.setLabelAddr(startOfWhile, instrStream.instrs.size());
-        compileASTNode(node.children[1], env, instrStream);
+        compileBody(node.children[1], env, instrStream);
         env.setLabelAddr(condOfWhile, instrStream.instrs.size());
-        compileASTNode(node.children[0], env, instrStream);
+        compileExpr(node.children[0], env, instrStream);
         instrStream.instrs.emplace_back(IJnz, startOfWhile);
         break;
     }
@@ -1299,39 +1387,19 @@ void compileASTNode(const ASTNode& node, Env& env, InstrStream& instrStream)
     case ReturnVal:
         assert(node.children.size() == 1);
         assert(node.children[0].isExpr());
-        compileASTNode(node.children[0], env, instrStream);
+        compileExpr(node.children[0], env, instrStream);
         instrStream.instrs.emplace_back(IReturn);
         break;
-
-    case Body:
-    {
-        int numVars = 0;
-        env.pushScope();
-        for (const ASTNode& child : node.children)
-        {
-            assert(!child.isExpr() && child.type != Body && child.type != Program);
-            errorAssert(child.type != FunDef, "Compile", "Illegal nested function definition", child.line);
-            compileASTNode(child, env, instrStream);
-            if (child.type == VarDef)
-            {
-                ++numVars;
-                env.defineVar(child.name, DefLocalVar, child.line);
-            }
-        }
-        env.popScope();
-        std::fill_n(std::back_inserter(instrStream.instrs), numVars, Instr(IPop));
-        break;
-    }
 
     case VarDef:
         assert(node.children.size() == 1);
         assert(node.children[0].isExpr());
-        compileASTNode(node.children[0], env, instrStream);
+        compileExpr(node.children[0], env, instrStream);
         break;
 
     case FunDef:
         assert(node.children.size() == 1);
-        assert(node.children[0].type == Body);
+        assert(node.children[0].isBody());
         env.pushFrame(node.paramNames.size());
         env.pushScope();
         for (size_t i = 0; i < node.paramNames.size(); ++i)
@@ -1341,107 +1409,141 @@ void compileASTNode(const ASTNode& node, Env& env, InstrStream& instrStream)
         env.defineVar("(return address)", DefLocalVar, node.line);
         env.defineVar("(old base pointer)", DefLocalVar, node.line);
         env.defineVar("(old stack pointer)", DefLocalVar, node.line);
-        compileASTNode(node.children[0], env, instrStream);
+        compileBody(node.children[0], env, instrStream);
         instrStream.instrs.emplace_back(IPush, 0);
         instrStream.instrs.emplace_back(IReturn);
         env.popScope();
         env.popFrame(node.paramNames.size());
         break;
 
-    case Program:
-    {
-        env.pushFrame(0);
-        env.pushScope();
-
-        env.defineFun("read", env.newLabel(), 0, node.line);
-        env.defineFun("print", env.newLabel(), 1, node.line);
-        env.defineFun("exit", env.newLabel(), 1, node.line);
-
-        for (const ASTNode& child : node.children)
-        {
-            assert(!child.isExpr() && child.type != Body && child.type != Program);
-            errorAssert(child.type == VarDef || child.type == FunDef, "Compile", "Illegal statement outside function body", child.line);
-            if (child.type == FunDef) env.defineFun(child.name, env.newLabel(), child.paramNames.size(), child.line);
-        }
-
-        for (const ASTNode& child : node.children)
-        {
-            if (child.type == FunDef) continue;
-            compileASTNode(child, env, instrStream);
-            if (child.type == VarDef) env.defineVar(child.name, DefGlobalVar, child.line);
-        }
-
-        errorAssert(env.defs.find("main") != env.defs.end(), "Compile", "`main` must be defined", node.line);
-        const Definition& def = env.getDef("main", node.line);
-        errorAssert(def.type == DefFun, "Compile", "`main` must be a function", node.line);
-        errorAssert(def.params == 0, "Compile", "`main` must take no arguments", node.line);
-        instrStream.instrs.emplace_back(IAddr, def.addr);
-        instrStream.instrs.emplace_back(ICall, 0);
-        instrStream.instrs.emplace_back(IExit);
-
-        env.setLabelAddr(env.getDef("read", node.line).addr, instrStream.instrs.size());
-        instrStream.instrs.emplace_back(IRead);
-        instrStream.instrs.emplace_back(IReturn);
-
-        env.setLabelAddr(env.getDef("print", node.line).addr, instrStream.instrs.size());
-        instrStream.instrs.emplace_back(ILocal, -1);
-        instrStream.instrs.emplace_back(ILoad);
-        instrStream.instrs.emplace_back(IPrint);
-        instrStream.instrs.emplace_back(IPush, 0);
-        instrStream.instrs.emplace_back(IReturn);
-
-        env.setLabelAddr(env.getDef("exit", node.line).addr, instrStream.instrs.size());
-        instrStream.instrs.emplace_back(ILocal, -1);
-        instrStream.instrs.emplace_back(ILoad);
-        instrStream.instrs.emplace_back(IExit);
-        instrStream.instrs.emplace_back(IPush, 0);
-        instrStream.instrs.emplace_back(IReturn);
-
-        for (const ASTNode& child : node.children)
-        {
-            if (child.type != FunDef) continue;
-            env.setLabelAddr(env.getDef(child.name, child.line).addr, instrStream.instrs.size());
-            compileASTNode(child, env, instrStream);
-        }
-
-        env.popScope();
-        env.popFrame(0);
-
-        for (Instr& instr : instrStream.instrs)
-        {
-            if (instr.type != IAddr && instr.type != IJmp && instr.type != IJzr && instr.type != IJnz) continue;
-            instr.arg = env.getLabelAddr(instr.arg);
-        }
-
-        break;
-    }
-
     default:
         errorAssert(false, "Compile", "Unsupported node type", node.line);
     }
 }
 
+void compileBody(const ASTNode& node, Env& env, InstrStream& instrStream)
+{
+    int numVars = 0;
+    env.pushScope();
+    for (const ASTNode& child : node.children)
+    {
+        assert(!child.isExpr() && child.type != Body && child.type != Program);
+        errorAssert(child.type != FunDef, "Compile", "Illegal nested function definition", child.line);
+        compileStmt(child, env, instrStream);
+        if (child.type == VarDef)
+        {
+            ++numVars;
+            env.defineVar(child.name, DefLocalVar, child.line);
+        }
+    }
+    env.popScope();
+    std::fill_n(std::back_inserter(instrStream.instrs), numVars, Instr(IPop));
+}
+
 InstrStream compileProgram(const ASTNode& node)
 {
+    assert(node.isProgram() && node.isComplete());
+
     Env env;
     InstrStream instrStream;
-    compileASTNode(node, env, instrStream);
+
+    env.pushFrame(0);
+    env.pushScope();
+
+    env.defineFun("alloc", env.newLabel(), 1, node.line);
+    env.defineFun("free", env.newLabel(), 1, node.line);
+    env.defineFun("read", env.newLabel(), 0, node.line);
+    env.defineFun("print", env.newLabel(), 1, node.line);
+    env.defineFun("flush", env.newLabel(), 0, node.line);
+    env.defineFun("exit", env.newLabel(), 1, node.line);
+
+    for (const ASTNode& child : node.children)
+    {
+        assert(!child.isExpr() && child.type != Body && child.type != Program);
+        errorAssert(child.type == VarDef || child.type == FunDef, "Compile", "Illegal statement outside function body", child.line);
+        if (child.type == FunDef) env.defineFun(child.name, env.newLabel(), child.paramNames.size(), child.line);
+    }
+
+    for (const ASTNode& child : node.children)
+    {
+        if (child.type == FunDef) continue;
+        compileStmt(child, env, instrStream);
+        if (child.type == VarDef) env.defineVar(child.name, DefGlobalVar, child.line);
+    }
+
+    errorAssert(env.defs.find("main") != env.defs.end(), "Compile", "`main` must be defined", node.line);
+    const Definition& def = env.getDef("main", node.line);
+    errorAssert(def.type == DefFun, "Compile", "`main` must be a function", node.line);
+    errorAssert(def.params == 0, "Compile", "`main` must take no arguments", node.line);
+    instrStream.instrs.emplace_back(IAddr, def.addr);
+    instrStream.instrs.emplace_back(ICall, 0);
+    instrStream.instrs.emplace_back(IExit);
+
+    env.setLabelAddr(env.getDef("alloc", node.line).addr, instrStream.instrs.size());
+    instrStream.instrs.emplace_back(ILocal, -1);
+    instrStream.instrs.emplace_back(ILoad);
+    instrStream.instrs.emplace_back(IAlloc);
+    instrStream.instrs.emplace_back(IReturn);
+
+    env.setLabelAddr(env.getDef("free", node.line).addr, instrStream.instrs.size());
+    instrStream.instrs.emplace_back(ILocal, -1);
+    instrStream.instrs.emplace_back(ILoad);
+    instrStream.instrs.emplace_back(IFree);
+    instrStream.instrs.emplace_back(IReturn);
+
+    env.setLabelAddr(env.getDef("read", node.line).addr, instrStream.instrs.size());
+    instrStream.instrs.emplace_back(IRead);
+    instrStream.instrs.emplace_back(IReturn);
+
+    env.setLabelAddr(env.getDef("print", node.line).addr, instrStream.instrs.size());
+    instrStream.instrs.emplace_back(ILocal, -1);
+    instrStream.instrs.emplace_back(ILoad);
+    instrStream.instrs.emplace_back(IPrint);
+    instrStream.instrs.emplace_back(IPush, 0);
+    instrStream.instrs.emplace_back(IReturn);
+
+    env.setLabelAddr(env.getDef("flush", node.line).addr, instrStream.instrs.size());
+    instrStream.instrs.emplace_back(IFlush);
+    instrStream.instrs.emplace_back(IPush, 0);
+    instrStream.instrs.emplace_back(IReturn);
+
+    env.setLabelAddr(env.getDef("exit", node.line).addr, instrStream.instrs.size());
+    instrStream.instrs.emplace_back(ILocal, -1);
+    instrStream.instrs.emplace_back(ILoad);
+    instrStream.instrs.emplace_back(IExit);
+    instrStream.instrs.emplace_back(IPush, 0);
+    instrStream.instrs.emplace_back(IReturn);
+
+    for (const ASTNode& child : node.children)
+    {
+        if (child.type != FunDef) continue;
+        env.setLabelAddr(env.getDef(child.name, child.line).addr, instrStream.instrs.size());
+        compileStmt(child, env, instrStream);
+    }
+
+    env.popScope();
+    env.popFrame(0);
+
+    for (Instr& instr : instrStream.instrs)
+    {
+        if (instr.type != IAddr && instr.type != IJmp && instr.type != IJzr && instr.type != IJnz) continue;
+        instr.arg = env.getLabelAddr(instr.arg);
+    }
+
     return instrStream;
 }
 
-ValueT safePopBack(std::vector<ValueT>& stack, ValueT pc)
-{
-    errorAssert(!stack.empty(), "Runtime", "Tried to pop from empty stack", pc);
-    ValueT back = stack.back();
-    stack.pop_back();
-    return back;
-}
+const ValueT STACK_SIZE = 8 * 1024 * 1024;
 
 ValueT executeProgram(const InstrStream& instrStream, std::istream& in, std::ostream& out)
 {
+    static_assert(sizeof(ValueT) == sizeof(ValueT*));
+
     ValueT pc = 0;
     ValueT bp = 0;
-    std::vector<ValueT> stack;
+    ValueT sp = 0;
+
+    std::unique_ptr<ValueT[]> stack = std::make_unique<ValueT[]>(STACK_SIZE);
 
     while (pc >= 0 && pc < (ValueT) instrStream.instrs.size())
     {
@@ -1451,143 +1553,146 @@ ValueT executeProgram(const InstrStream& instrStream, std::istream& in, std::ost
         switch (instr.type)
         {
         case IPush:
-            stack.push_back(instr.arg);
+            stack[sp++] = instr.arg;
             break;
 
         case IPop:
-            safePopBack(stack, pc);
+            --sp;
             break;
 
         case IBinOp:
         {
-            ValueT right = stack.back();
-            stack.pop_back();
-            ValueT left = safePopBack(stack, pc);
+            ValueT right = stack[--sp];
+            ValueT left = stack[--sp];
             switch (instr.arg)
             {
             case ArAdd:
-                stack.push_back(left + right);
+                stack[sp++] = left + right;
                 break;
 
             case ArSub:
-                stack.push_back(left - right);
+                stack[sp++] = left - right;
                 break;
 
             case ArMul:
-                stack.push_back(left * right);
+                stack[sp++] = left * right;
                 break;
 
             case ArDiv:
                 errorAssert(right != 0, "Runtime", "Division by 0", pc);
-                stack.push_back(left / right);
+                stack[sp++] = left / right;
                 break;
 
             case ArMod:
                 errorAssert(right != 0, "Runtime", "Modulo by 0", pc);
-                stack.push_back(left % right);
+                stack[sp++] = left % right;
                 break;
 
             case CmpEq:
-                stack.push_back(left == right);
+                stack[sp++] = left == right;
                 break;
 
             case CmpNeq:
-                stack.push_back(left != right);
+                stack[sp++] = left != right;
                 break;
 
             case CmpLt:
-                stack.push_back(left < right);
+                stack[sp++] = left < right;
                 break;
 
             case CmpGt:
-                stack.push_back(left > right);
+                stack[sp++] = left > right;
                 break;
 
             case CmpLeq:
-                stack.push_back(left <= right);
+                stack[sp++] = left <= right;
                 break;
 
             case CmpGeq:
-                stack.push_back(left >= right);
+                stack[sp++] = left >= right;
                 break;
 
             case LogAnd:
-                stack.push_back(left && right);
+                stack[sp++] = left && right;
                 break;
 
             case LogOr:
-                stack.push_back(left || right);
+                stack[sp++] = left || right;
                 break;
 
             case BitAnd:
-                stack.push_back(left & right);
+                stack[sp++] = left & right;
                 break;
 
             case BitOr:
-                stack.push_back(left | right);
+                stack[sp++] = left | right;
                 break;
 
             case BitXor:
-                stack.push_back(left ^ right);
+                stack[sp++] = left ^ right;
                 break;
 
             case BitLShift:
-                stack.push_back(left << right);
+                stack[sp++] = left << right;
                 break;
 
             case BitRShift:
-                stack.push_back(left >> right);
+                stack[sp++] = left >> right;
                 break;
+
+            default:
+                errorAssert(false, "Runtime", "Unsupported binary operator", pc);
             }
             break;
         }
 
         case IUnOp:
         {
-            ValueT val = safePopBack(stack, pc);
+            ValueT val = stack[--sp];
             switch (instr.arg)
             {
             case UnPlus:
-                stack.push_back(+val);
+                stack[sp++] = +val;
                 break;
 
             case UnMinus:
-                stack.push_back(-val);
+                stack[sp++] = -val;
                 break;
 
             case LogNot:
-                stack.push_back(!val);
+                stack[sp++] = !val;
                 break;
 
             case BitNot:
-                stack.push_back(~val);
+                stack[sp++] = ~val;
                 break;
+
+            default:
+                errorAssert(false, "Runtime", "Unsupported unary operator", pc);
             }
             break;
         }
 
         case IGlobal:
-            stack.push_back(instr.arg);
+            stack[sp++] = reinterpret_cast<ValueT>(stack.get() + instr.arg);
             break;
 
         case ILocal:
-            stack.push_back(bp + instr.arg);
+            stack[sp++] = reinterpret_cast<ValueT>(stack.get() + bp + instr.arg);
             break;
 
         case ILoad:
         {
-            ValueT ptr = safePopBack(stack, pc);
-            errorAssert(ptr >= 0 && ptr < (ValueT) stack.size(), "Runtime", "Loading from invalid pointer", pc);
-            stack.push_back(stack[ptr]);
+            ValueT ptr = stack[--sp];
+            stack[sp++] = *reinterpret_cast<ValueT*>(ptr);
             break;
         }
 
         case IStore:
         {
-            ValueT val = safePopBack(stack, pc);
-            ValueT ptr = safePopBack(stack, pc);
-            errorAssert(ptr >= 0 && ptr < (ValueT) stack.size(), "Runtime", "Storing to invalid pointer", pc);
-            stack[ptr] = val;
+            ValueT val = stack[--sp];
+            ValueT ptr = stack[--sp];
+            *reinterpret_cast<ValueT*>(ptr) = val;
             break;
         }
 
@@ -1597,29 +1702,29 @@ ValueT executeProgram(const InstrStream& instrStream, std::istream& in, std::ost
 
         case IJzr:
         {
-            ValueT val = safePopBack(stack, pc);
+            ValueT val = stack[--sp];
             if (val == 0) nextPc = instr.arg;
             break;
         }
 
         case IJnz:
         {
-            ValueT val = safePopBack(stack, pc);
+            ValueT val = stack[--sp];
             if (val != 0) nextPc = instr.arg;
             break;
         }
 
         case IAddr:
-            stack.push_back(instr.arg);
+            stack[sp++] = instr.arg;
             break;
 
         case ICall:
         {
-            ValueT newNextPc = safePopBack(stack, pc);
-            ValueT newBp = stack.size();
-            stack.push_back(nextPc);
-            stack.push_back(bp);
-            stack.push_back(newBp - instr.arg);
+            ValueT newNextPc = stack[--sp];
+            ValueT newBp = sp;
+            stack[sp++] = nextPc;
+            stack[sp++] = bp;
+            stack[sp++] = newBp - instr.arg;
             nextPc = newNextPc;
             bp = newBp;
             break;
@@ -1627,34 +1732,52 @@ ValueT executeProgram(const InstrStream& instrStream, std::istream& in, std::ost
 
         case IReturn:
         {
-            ValueT val = safePopBack(stack, pc);
+            ValueT val = stack[--sp];
             ValueT oldBp = bp;
             nextPc = stack[oldBp];
             bp = stack[oldBp + 1];
-            errorAssert(stack[oldBp + 2] >= 0 && stack[oldBp + 2] <= (ValueT) stack.size(), "Runtime", "Invalid stack pointer", pc);
-            stack.resize(stack[oldBp + 2]);
-            stack.push_back(val);
+            sp = stack[oldBp + 2];
+            stack[sp++] = val;
+            break;
+        }
+
+        case IAlloc:
+        {
+            ValueT len = stack[--sp];
+            stack[sp++] = reinterpret_cast<ValueT>(new ValueT[len]);
+            break;
+        }
+
+        case IFree:
+        {
+            ValueT ptr = stack[--sp];
+            delete[] reinterpret_cast<ValueT*>(ptr);
             break;
         }
 
         case IRead:
-            stack.push_back(0);
-            in >> stack.back();
+            in >> stack[sp++];
             break;
 
         case IPrint:
         {
-            ValueT val = safePopBack(stack, pc);
-            out << val << "\n";
+            out << stack[--sp] << "\n";
             break;
         }
 
+        case IFlush:
+            out << std::flush;
+            break;
+
         case IExit:
         {
-            ValueT val = safePopBack(stack, pc);
-            return val;
+            out << std::flush;
+            return stack[--sp];
             break;
         }
+
+        default:
+            errorAssert(false, "Runtime", "Unsupported instruction type", pc);
         }
 
         pc = nextPc;
@@ -1666,6 +1789,9 @@ ValueT executeProgram(const InstrStream& instrStream, std::istream& in, std::ost
 
 int main(int argc, char *argv[])
 {
+    std::ios::sync_with_stdio(false);
+    std::cin.tie(nullptr);
+
     std::string fileName;
     if (argc >= 2) fileName = argv[1];
     else std::cin >> fileName;

@@ -1,3 +1,3 @@
-g++ -O2 interpreter.cpp -o interpreter.exe
+g++ -O3 interpreter.cpp -o interpreter.exe
 
-interpreter.exe prog.txt
+interpreter.exe samples/%1.mnl

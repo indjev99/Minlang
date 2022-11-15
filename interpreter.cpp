@@ -2,10 +2,10 @@
 #include <cassert>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
-#include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 void errorAssert(bool cond, const std::string& type, const std::string& descr, int line)
@@ -17,15 +17,31 @@ void errorAssert(bool cond, const std::string& type, const std::string& descr, i
 
 typedef long long ValueT;
 
+template <class T>
+std::map<std::string, T> computeInverseMap(const std::map<T, std::string>& tStrings)
+{
+    std::map<std::string, T> tMap;
+    for (auto& [t, str] : tStrings)
+    {
+        tMap.insert({str, t});
+    }
+    std::cerr << "Inverse: " << std::endl;
+    for (auto& [str, t] : tMap)
+    {
+        std::cerr << str << " -> " << t << std::endl;
+    }
+    return tMap;
+}
+
 enum Operator
 {
-    UnPlus,
-    UnMinus,
     ArAdd,
     ArSub,
     ArMul,
     ArDiv,
     ArMod,
+    UnPlus,
+    UnMinus,
     CmpEq,
     CmpNeq,
     CmpLt,
@@ -40,40 +56,19 @@ enum Operator
     BitXor,
     BitNot,
     BitLShift,
-    BitRShift
+    BitRShift,
+    AddrOf,
+    Deref
 };
 
-const std::unordered_map<std::string, Operator> operatorMap = {
-    {"+", ArAdd},
-    {"-", ArSub},
-    {"*", ArMul},
-    {"/", ArDiv},
-    {"%", ArMod},
-    {"==", CmpEq},
-    {"!=", CmpNeq},
-    {"<", CmpLt},
-    {">", CmpGt},
-    {"<=", CmpLeq},
-    {">=", CmpGeq},
-    {"&&", LogAnd},
-    {"||", LogOr},
-    {"!", LogNot},
-    {"&", BitAnd},
-    {"|", BitOr},
-    {"^", BitXor},
-    {"~", BitNot},
-    {"<<", BitLShift},
-    {">>", BitRShift}
-};
-
-const std::unordered_map<Operator, std::string> operatorStrings = {
-    {UnPlus , "+"},
-    {UnMinus , "-"},
+const std::map<Operator, std::string> operatorStrings = {
     {ArAdd , "+"},
     {ArSub , "-"},
     {ArMul , "*"},
     {ArDiv , "/"},
     {ArMod , "%"},
+    {UnPlus , "+"},
+    {UnMinus , "-"},
     {CmpEq , "=="},
     {CmpNeq, "!="},
     {CmpLt, "<"},
@@ -88,10 +83,17 @@ const std::unordered_map<Operator, std::string> operatorStrings = {
     {BitXor, "^"},
     {BitNot, "~"},
     {BitLShift, "<<"},
-    {BitRShift, ">>"}
+    {BitRShift, ">>"},
+    {AddrOf, "&"},
+    {Deref, "*"}
 };
 
-const std::unordered_map<Operator, int> operatorPrec = {
+const std::map<std::string, Operator> operatorMap = computeInverseMap(operatorStrings);
+
+const int minOperatorPrec = 0;
+const int maxOperatorPrec = 100;
+
+const std::map<Operator, int> operatorPrec = {
     {UnPlus, 20},
     {UnMinus, 20},
     {ArAdd, 9},
@@ -113,13 +115,12 @@ const std::unordered_map<Operator, int> operatorPrec = {
     {BitXor, 4},
     {BitNot, 20},
     {BitLShift, 8},
-    {BitRShift, 8}
+    {BitRShift, 8},
+    {AddrOf, 20},
+    {Deref, 20}
 };
 
-const int minOperatorPrec = 0;
-const int maxOperatorPrec = 100;
-
-const std::unordered_set<Operator> binOperators = {
+const std::set<Operator> binOperators = {
     ArAdd,
     ArSub,
     ArMul,
@@ -140,12 +141,28 @@ const std::unordered_set<Operator> binOperators = {
     BitRShift
 };
 
-const std::unordered_map<Operator, Operator> unOperators = {
-    {ArAdd, UnPlus},
-    {ArSub, UnMinus},
-    {LogNot, LogNot},
-    {BitNot, BitNot}
+const std::set<Operator> unOperators = {
+    UnPlus,
+    UnMinus,
+    LogNot,
+    BitNot,
+    AddrOf,
+    Deref
 };
+
+std::map<Operator, Operator> computeOperatorToUnMap()
+{
+    std::map<Operator, Operator> operatorToUnMap;
+    for (Operator unOp : unOperators)
+    {
+        std::string str = operatorStrings.at(unOp);
+        Operator op = operatorMap.at(str);
+        operatorToUnMap.insert({op, unOp});
+    }
+    return operatorToUnMap;
+}
+
+const std::map<Operator, Operator> operatorToUnMap = computeOperatorToUnMap();
 
 enum TokenType
 {
@@ -172,27 +189,7 @@ enum TokenType
     Eof
 };
 
-const std::unordered_map<std::string, TokenType> tokenMap = {
-    {"=", Assign},
-    {";", Semicol},
-    {",", Comma},
-    {"(", LBrack},
-    {")", RBrack},
-    {"[", LSub},
-    {"]", RSub},
-    {"if", If},
-    {"then", Then},
-    {"elif", Elif},
-    {"else", Else},
-    {"while", While},
-    {"do", Do},
-    {"end", End},
-    {"return", Return},
-    {"var", Var},
-    {"fun", Fun}
-};
-
-const std::unordered_map<TokenType, std::string> tokenStrings = {
+const std::map<TokenType, std::string> tokenStrings = {
     {Assign, "="},
     {Semicol, ";"},
     {Comma, ","},
@@ -212,6 +209,8 @@ const std::unordered_map<TokenType, std::string> tokenStrings = {
     {Fun, "fun"},
     {Eof, ""}
 };
+
+const std::map<std::string, TokenType> tokenMap = computeInverseMap(tokenStrings);
 
 struct Token
 {
@@ -371,6 +370,8 @@ enum ASTNodeType
     Application,
     Bracketed,
     Subscript,
+    AddrOfOp,
+    DerefOp,
     IgnoreValue,
     Assignment,
     IfThenElse,
@@ -384,12 +385,12 @@ enum ASTNodeType
 
 bool isAddrExpr(ASTNodeType type)
 {
-    return type == GetVar || type == Subscript;
+    return type == GetVar || type == Subscript || type == DerefOp;
 }
 
 bool isExpr(ASTNodeType type)
 {
-    return type == GetVar || type == ConstNumber || type == BinOperator || type == UnOperator || type == Application || type == Bracketed || type == Subscript;
+    return isAddrExpr(type) || type == ConstNumber || type == BinOperator || type == UnOperator || type == Application || type == AddrOfOp;
 }
 
 bool isStmt(ASTNodeType type)
@@ -560,6 +561,8 @@ struct ASTNode
             out << ")";
             break;
 
+        case AddrOfOp:
+        case DerefOp:
         case UnOperator:
             out << operatorStrings.at(oper);
             if (children.size() > 0) children[0].print(out, indent + 1);
@@ -721,6 +724,21 @@ bool popBody(std::vector<ASTNode>& nodeStack, int line)
     return true;
 }
 
+ASTNode transformExpr(ASTNode&& expr, int line)
+{
+    std::cerr << expr.type << std::endl;
+    expr.print(std::cerr, 0);
+    std::cerr << std::endl;
+    assert(expr.isExpr() && expr.isComplete());
+    if (expr.type == UnOperator && expr.oper == AddrOf)
+    {
+        errorAssert(expr.children[0].isAddrExpr(), "Parse", "Unexpected AddrOfOp operator", line);
+        expr.type = AddrOfOp;
+    }
+    else if (expr.type == UnOperator && expr.oper == Deref) expr.type = DerefOp;
+    return expr;
+}
+
 ASTNode popOperators(std::vector<ASTNode>& nodeStack, int prec, int line)
 {
     ASTNode right = std::move(nodeStack.back());
@@ -737,7 +755,7 @@ ASTNode popOperators(std::vector<ASTNode>& nodeStack, int prec, int line)
     }
 
     assert(right.isComplete() && right.isExpr());
-    return right;
+    return transformExpr(std::move(right), line);
 }
 
 ASTNode parseProgram(const TokenStream& tokenStream)
@@ -816,26 +834,33 @@ ASTNode parseProgram(const TokenStream& tokenStream)
         case Op:
         {
             auto itBin = binOperators.find(token.oper);
-            auto itUn = unOperators.find(token.oper);
-            assert(itBin != binOperators.end() || itUn != unOperators.end());
+            auto itUn = operatorToUnMap.find(token.oper);
+            bool isBin = itBin != binOperators.end();
+            bool isUn = itUn != operatorToUnMap.end();
+            assert(isBin || isUn);
             bool okBin = last.isComplete() && last.isExpr();
             bool okUn = !okBin;
-            errorAssert(itUn != unOperators.end() || okBin, "Parse", "Unexpected binary operator", line);
-            errorAssert(itBin != binOperators.end() || okUn, "Parse", "Unexpected unary operator", line);
-            if (itUn != unOperators.end() && okUn) nodeStack.emplace_back(UnOperator, itUn->second, 1, line);
-            else if (itBin != binOperators.end() && okBin)
+            std::cerr << "Token: ";
+            token.print(std::cerr);
+            std::cerr << std::endl;
+            std::cerr << isBin << " " << isUn << " | " << okBin << " " << okUn << std::endl;
+            errorAssert(isUn || okBin, "Parse", "Unexpected binary operator", line);
+            errorAssert(isBin || okUn, "Parse", "Unexpected unary operator", line);
+            if (isUn && okUn) nodeStack.emplace_back(UnOperator, itUn->second, 1, line);
+            else if (isBin && okBin)
             {
                 ASTNode expr = popOperators(nodeStack, operatorPrec.at(token.oper), line);
                 assert(!expr.isEmptyNode());
                 nodeStack.emplace_back(BinOperator, token.oper, 2, line);
                 nodeStack.back().addExpr(std::move(expr));
             }
+            else assert(false);
             break;
         }
 
         case Assign:
         {
-            ASTNode expr = popOperators(nodeStack, maxOperatorPrec, line);
+            ASTNode expr = popOperators(nodeStack, minOperatorPrec, line);
             errorAssert(!expr.isEmptyNode() && expr.isAddrExpr(), "Parse", "Unexpected assignment", line);
             ASTNode& last = nodeStack.back();
             errorAssert(!last.isExpr() && (last.isComplete() || last.needsBody()), "Parse", "Unexpected assignment", line);
@@ -906,6 +931,7 @@ ASTNode parseProgram(const TokenStream& tokenStream)
                 last.addExpr(std::move(expr));
                 last.remaining = 0;
             }
+            else assert(false);
             break;
         }
 
@@ -1041,7 +1067,7 @@ enum InstrType
     IExit
 };
 
-std::unordered_map<InstrType, std::string> intrStrings = {
+std::map<InstrType, std::string> intrStrings = {
     {IPush, "push"},
     {IPop, "pop"},
     {IBinOp, "binOp"},
@@ -1135,10 +1161,10 @@ struct Env
 {
     std::vector<ValueT> frameOffsets;
 
-    std::unordered_map<std::string, std::vector<Definition>> defs;
-    std::vector<std::unordered_set<std::string>> scopeDefs;
+    std::map<std::string, std::vector<Definition>> defs;
+    std::vector<std::set<std::string>> scopeDefs;
 
-    std::unordered_map<ValueT, ValueT> labelAddrs;
+    std::map<ValueT, ValueT> labelAddrs;
     ValueT currLabel = 0;
 
     void pushFrame(ValueT params)
@@ -1242,6 +1268,12 @@ void compileAddrExpr(const ASTNode& node, Env& env, InstrStream& instrStream)
         instrStream.instrs.emplace_back(IBinOp, ArAdd);
         break;
 
+    case DerefOp:
+        assert(node.children.size() == 1);
+        assert(node.children[0].isExpr());
+        compileExpr(node.children[0], env, instrStream);
+        break;
+
     default:
         errorAssert(false, "Compile", "Unsupported node type", node.line);
     }
@@ -1292,6 +1324,12 @@ void compileExpr(const ASTNode& node, Env& env, InstrStream& instrStream)
         assert(node.children[0].isExpr());
         compileExpr(node.children[0], env, instrStream);
         instrStream.instrs.emplace_back(IUnOp, node.oper);
+        break;
+
+    case AddrOfOp:
+        assert(node.children.size() == 1);
+        assert(node.children[0].isAddrExpr());
+        compileAddrExpr(node.children[0], env, instrStream);
         break;
 
     case Application:

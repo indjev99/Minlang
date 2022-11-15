@@ -840,10 +840,6 @@ ASTNode parseProgram(const TokenStream& tokenStream)
             assert(isBin || isUn);
             bool okBin = last.isComplete() && last.isExpr();
             bool okUn = !okBin;
-            std::cerr << "Token: ";
-            token.print(std::cerr);
-            std::cerr << std::endl;
-            std::cerr << isBin << " " << isUn << " | " << okBin << " " << okUn << std::endl;
             errorAssert(isUn || okBin, "Parse", "Unexpected binary operator", line);
             errorAssert(isBin || okUn, "Parse", "Unexpected unary operator", line);
             if (isUn && okUn) nodeStack.emplace_back(UnOperator, itUn->second, 1, line);

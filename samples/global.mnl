@@ -1,0 +1,14 @@
+var sum = 0;
+
+fun add(x) =
+    sum = sum + x;
+end
+
+fun main() =
+    while 1 do
+        var x = read();
+        add(x);
+        print(sum);
+        flush();
+    end
+end

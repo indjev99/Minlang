@@ -1,0 +1,7 @@
+fun main() =
+    var x = read();
+    print(x * 2);
+    flush();
+    var y = read();
+    print(y * 2);
+end

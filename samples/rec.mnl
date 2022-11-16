@@ -1,0 +1,18 @@
+fun fib(n) =
+    if n == 0 then
+        return 0;
+    elif n == 1 then
+        return 1;
+    end
+
+    return fib(n - 1) + fib(n - 2);
+end
+
+fun main() =
+    var n = 0;
+    while 1 do
+        print(fib(n));
+        flush();
+        n = n + 1;
+    end
+end

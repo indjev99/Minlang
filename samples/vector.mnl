@@ -1,0 +1,169 @@
+# A vector is a dynamic array, represented by a pointer to a tripe (data, size, capacity)
+
+fun vecNew() =
+    var vec = alloc(3);
+    vec[0] = 0;
+    vec[1] = 0;
+    vec[2] = 0;
+    return vec;
+end
+
+fun vecDelete(vec) =
+    free(vec[0]);
+    free(vec);
+end
+
+fun vecSetCapacity(vec, newCapacity) =
+    if newCapacity < vec[1] then
+        exit(-1);
+    end
+    vec[2] = newCapacity;
+    var newData = alloc(newCapacity);
+    var i = 0;
+    while i < vec[1] do
+        newData[i] = vec[0][i];
+        i = i + 1;
+    end
+    free(vec[0]);
+    vec[0] = newData;
+end
+
+fun vecExpand(vec) =
+    var newCapacity = vec[2] * 2;
+    if newCapacity == 0 then
+        newCapacity = 1;
+    end
+    vecSetCapacity(vec, newCapacity);
+end
+
+fun vecResize(vec, newSize) =
+    if newSize > vec[2] then
+        vecSetCapacity(vec, newSize);
+    end
+    vec[1] = newSize;
+end
+
+fun vecPush(vec, val) =
+    if vec[1] == vec[2] then
+        vecExpand(vec);
+    end
+    vec[0][vec[1]] = val;
+    vec[1] = vec[1] + 1;
+end
+
+fun vecPop(vec) =
+    if vec[1] == 0 then
+        exit(-1);
+    end
+    vec[1] = vec[1] - 1;
+end
+
+fun vecAt(vec, idx) =
+    if idx < 0 || idx >= vec[1] then
+        exit(-1);
+    end
+    return &vec[0][idx];
+end
+
+fun vecData(vec) =
+    return vec[0];
+end
+
+fun vecSize(vec) =
+    return vec[1];
+end
+
+fun vecCapacity(vec) =
+    return vec[2];
+end
+
+# Example use case: Adjacency list for graph
+
+fun main() =
+    # Input
+    var n = read();
+    var m = read();
+    var edges = alloc(n);
+    var i = 0;
+    while i < n do
+        edges[i] = vecNew();
+        i = i + 1;
+    end
+    i = 0;
+    while i < m do
+        var from = read();
+        var to = read();
+        vecPush(edges[from], to);
+        i = i + 1;
+    end
+
+    # Init
+    var dists = alloc(n);
+    i = 0;
+    while i < n do
+        dists[i] = -1;
+        i = i + 1;
+    end
+
+    # BFS
+    var queue = vecNew();
+    var qPos = 0;
+    vecPush(queue, 0);
+    dists[0] = 0;
+
+    while qPos < vecSize(queue) do
+        var curr = *vecAt(queue, qPos);
+        qPos = qPos + 1;
+        var j = 0;
+        while j < vecSize(edges[curr]) do
+            var next = *vecAt(edges[curr], j);
+            if dists[next] == -1 then
+                dists[next] = dists[curr] + 1;
+                vecPush(queue, next);
+            end
+            j = j + 1;
+        end
+    end
+
+    # Print dists
+    i = 0;
+    while i < n do
+        print(dists[i]);
+        i = i + 1;
+    end
+
+    #Free memory
+    i = 0;
+    while i < n do
+        vecDelete(edges[i]);
+        i = i + 1;
+    end
+    free(edges);
+    free(dists);
+    vecDelete(queue);
+end
+
+#>
+
+Sample input:
+
+6 8
+0 1
+0 2
+1 2
+2 3
+3 0
+4 1
+3 4
+2 4
+
+Sample output:
+
+0
+1
+1
+2
+2
+-1
+
+<#

@@ -320,7 +320,9 @@ TokenStream lexProgram(std::istream& in)
     int line = 1;
     std::string curr = "";
     SymbolSet currSymbSet = ANY;
-    bool comment = false;
+    int lineComment = 0;
+    int nestedComment = 0;
+    char prevC = ' ';
 
     TokenStream tokenStream;
 
@@ -328,8 +330,26 @@ TokenStream lexProgram(std::istream& in)
     {
         char c = in.get();
 
-        if (c == '#') comment = true;
-        else if (c == '\n') comment = false;
+        if (c == '#') ++lineComment;
+        else if (c == '\n') lineComment = 0;
+
+        bool comment = lineComment > 0 || nestedComment > 0;
+
+        if (comment)
+        {
+            if (prevC == '#' && c == '>')
+            {
+                ++nestedComment;
+                --lineComment;
+            }
+            else if (prevC == '<' && c == '#')
+            {
+                --nestedComment;
+                --lineComment;
+            }
+
+            prevC = c;
+        }
 
         SymbolSet cSet;
         if (comment || isspace(c)) cSet = SPACE;

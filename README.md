@@ -1,7 +1,7 @@
 # Minlang
 A small imperative programming language.
 
-Semmantics:
+Semantics:
 - All values are signed 64 bit intergers that can also be interpreted as pointers.
 - Function arguments are passed by value and are computed from left to right.
 

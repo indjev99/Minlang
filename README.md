@@ -1,6 +1,13 @@
 # Minlang
 A small imperative programming language.
-All values are signed 64 bit intergers that can also be interpreted as pointers.
+
+Semmantics:
+- All values are signed 64 bit intergers that can also be interpreted as pointers.
+- Function arguments are passed by value and are computed from left to right.
+
+Lexing:
+- Start single line comments with `#`
+- Start nested multi line comments with `#>` and end them with `<#` 
 
 Grammar:
 
@@ -26,11 +33,13 @@ EXPR ::=
   | NAME "(" (EXPR (, EXPR)*) ")"
   | EXPR BIN_OP EXPR
   | UN_OP EXPR
+  | &ADDR_EXPR
   | "(" EXPR ")"
 
 ADDR_EXPR ::=
     NAME
   | EXPR[EXPR]
+  | *EXPR
   | "(" ADDR_EXPR ")"
 ```
 
@@ -43,3 +52,13 @@ Primive functions:
 - `print(x)`
 - `flush()`
 - `exit(code)`
+
+Future plans:
+- Imports
+- Simple types: int64, pointers
+- Custom struct types
+- Arrays
+- Function pointers
+- Named arguments
+- Other 64 bit primitive types
+- Non 64 bit primitive types (requires handling alignment)

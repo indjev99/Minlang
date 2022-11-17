@@ -8,6 +8,8 @@ fun fib(n) =
     return fib(n - 1) + fib(n - 2);
 end
 
+var x(n) = 5;
+
 fun main() =
     var n = 0;
     while 1 do

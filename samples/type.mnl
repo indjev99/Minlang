@@ -1,0 +1,4 @@
+fun int() main() =
+    var int* ptr = ptr * 2;
+    return 0;
+end

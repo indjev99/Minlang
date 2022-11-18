@@ -1,4 +1,5 @@
 fun int() main() =
-    var int* ptr = ptr * 2;
+    var int* ptr = alloc(5);
+    nullptr = ptr;
     return 0;
 end

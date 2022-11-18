@@ -15,7 +15,7 @@ void errorAssert(bool cond, const std::string& kind, const std::string& descr, i
     exit(0);
 }
 
-typedef long long ValueT;
+typedef long long WordT;
 
 template <class T>
 std::map<std::string, T> computeInverseMap(const std::map<T, std::string>& tStrings)
@@ -211,7 +211,7 @@ struct Token
 {
     TokenKind kind;
     std::string name;
-    ValueT number;
+    WordT number;
     Operator oper;
     int line;
 
@@ -390,11 +390,13 @@ enum TypeKind
     Int64T,
     PointerT,
     FunctionT,
+    WildcardPtrT,
     CustomT
 };
 
 const std::map<TypeKind, std::string> baseTypeStrings = {
-    {Int64T, "int"}
+    {Int64T, "int"},
+    {WildcardPtrT, "wildcardPtr"}
 };
 
 const std::map<std::string, TypeKind> baseTypeMap = computeInverseMap(baseTypeStrings);
@@ -427,6 +429,17 @@ struct TypeNode
             this->name = name;
         }
     }
+
+    TypeNode(TypeKind kind)
+        : kind(kind)
+        , remaining(0)
+    {}
+
+    TypeNode(TypeKind kind, std::vector<TypeNode>&& children)
+        : kind(kind)
+        , children(std::move(children))
+        , remaining(0)
+    {}
 
     TypeNode(const TypeNode& other) = default;
     TypeNode(TypeNode&& other) = default;
@@ -473,7 +486,9 @@ struct TypeNode
 
     bool convertableTo(const TypeNode& other) const
     {
-        // TODO: Laxer check
+        if ((kind == PointerT && other.kind == WildcardPtrT) ||
+            (kind == WildcardPtrT && other.kind == PointerT))
+            return true;
         return structMatch(other);
     }
 
@@ -501,7 +516,7 @@ struct TypeNode
         switch (kind)
         {
         case DummyT:
-            out << "DUMMY";
+            out << "dummy";
             break;
 
         case PointerT:
@@ -552,36 +567,6 @@ enum ASTNodeKind
     Program
 };
 
-bool isAddrExpr(ASTNodeKind kind)
-{
-    return kind == GetVar || kind == Subscript || kind == DerefOp;
-}
-
-bool isExpr(ASTNodeKind kind)
-{
-    return isAddrExpr(kind) || kind == ConstNumber || kind == BinOperator || kind == UnOperator || kind == FunCall || kind == AddrOfOp;
-}
-
-bool isStmt(ASTNodeKind kind)
-{
-    return kind == IgnoreValue || kind == Assignment || kind == IfThenElse || kind == WhileDo || kind == ReturnVal;
-}
-
-bool isDef(ASTNodeKind kind)
-{
-    return kind == VarDef || kind == FunDef;
-}
-
-bool isBody(ASTNodeKind kind)
-{
-    return kind == Body;
-}
-
-bool isProgram(ASTNodeKind kind)
-{
-    return kind == Program;
-}
-
 void printIndent(std::ostream& out, int indent)
 {
     while (indent--) out << "  ";
@@ -594,7 +579,7 @@ struct ASTNode
     ASTNodeKind kind;
 
     std::string name;
-    ValueT number;
+    WordT number;
     Operator oper;
     TypeNode type;
     std::vector<std::string> paramNames;
@@ -619,7 +604,7 @@ struct ASTNode
         , line(line)
     {}
 
-    ASTNode(ASTNodeKind kind, ValueT number, int remaining, int line)
+    ASTNode(ASTNodeKind kind, WordT number, int remaining, int line)
         : kind(kind)
         , number(number)
         , remaining(remaining)
@@ -641,32 +626,32 @@ struct ASTNode
 
     bool isAddrExpr() const
     {
-        return ::isAddrExpr(kind);
+        return kind == GetVar || kind == Subscript || kind == DerefOp;
     }
 
     bool isExpr() const
     {
-        return ::isExpr(kind);
+        return isAddrExpr() || kind == ConstNumber || kind == BinOperator || kind == UnOperator || kind == FunCall || kind == AddrOfOp;
     }
 
     bool isStmt() const
     {
-        return ::isStmt(kind);
+        return kind == IgnoreValue || kind == Assignment || kind == IfThenElse || kind == WhileDo || kind == ReturnVal;
     }
 
     bool isDef() const
     {
-        return ::isDef(kind);
+        return kind == VarDef || kind == FunDef;
     }
 
     bool isBody() const
     {
-        return ::isBody(kind);
+        return kind == Body;
     }
 
     bool isProgram() const
     {
-        return ::isProgram(kind);
+        return kind == Program;
     }
 
     bool isComplete() const
@@ -759,10 +744,11 @@ struct ASTNode
             break;
 
         case FunCall:
+            if (children.size() > 0) children[0].print(out, indent + 1);
             out << name << "(";
-            for (size_t i = 0; i < children.size(); ++i)
+            for (size_t i = 1; i < children.size(); ++i)
             {
-                if (i > 0) out << ", ";
+                if (i > 1) out << ", ";
                 children[i].print(out, indent + 1);
             }
             out << ")";
@@ -1358,7 +1344,7 @@ enum LocKind
 struct Location
 {
     LocKind kind;
-    ValueT addr;
+    WordT addr;
 };
 
 struct Definition
@@ -1396,8 +1382,15 @@ struct Env
         scopeDefs.pop_back();
     }
 
-    void define(const std::string& name, const TypeNode& type)
+    void define(const std::string& name, const TypeNode& type, bool assertUnique = false, int line = -1)
     {
+        if (assertUnique) 
+        {
+            assert(line >= 0);
+            errorAssert(
+                std::find(scopeDefs.back().begin(), scopeDefs.back().end(), name) == scopeDefs.back().end(),
+                "Check", "Name already defined in score where this is illegal", line);
+        }
         scopeDefs.back().push_back(name);
         allDefs.push_back(std::make_unique<Definition>(type));
         defs[name].emplace_back(allDefs.back().get());
@@ -1429,7 +1422,7 @@ void checkParams(ASTNode& node, Env& env)
 
     for (size_t i = 0; i < node.paramNames.size(); ++i)
     {
-        env.define(node.paramNames[i], node.type.children[i + 1]);
+        env.define(node.paramNames[i], node.type.children[i + 1], true, node.line);
     }
 }
 
@@ -1449,14 +1442,22 @@ void checkAddrExpr(ASTNode& node, Env& env)
         break;
 
     case Subscript:
+    {
         assert(node.children.size() == 2);
         checkExpr(node.children[0], env);
         errorAssert(node.children[0].type.isSubscriptable(), "Check", "Subscripting non-subsriptable object", node.line);
         checkExpr(node.children[1], env);
         errorAssert(node.children[1].type.isIntegral(), "Check", "Subscripting with non-integral object", node.line);
         assert(node.children[0].type.children.size() == 1);
-        node.type = node.children[0].type.children[0];
+        ASTNode newNode(DerefOp, 1, node.line);
+        newNode.type = node.children[0].type.children[0];
+        node.kind = BinOperator;
+        node.oper = ArAdd;
+        node.type = TypeNode(PointerT, {newNode.type});
+        newNode.addChild(std::move(node));
+        node = std::move(newNode);
         break;
+    }
 
     case DerefOp:
         assert(node.children.size() == 1);
@@ -1484,25 +1485,24 @@ void checkExpr(ASTNode& node, Env& env)
     {
     case ConstNumber:
         assert(node.children.empty());
-        node.type = TypeNode(Int64T, 0);
+        node.type = TypeNode(Int64T);
         break;
 
     case BinOperator:
         assert(node.children.size() == 2);
         checkExpr(node.children[0], env);
         checkExpr(node.children[1], env);
-        // TODO: Handling of multiple numeric types
-        if (node.oper == ArAdd || node.oper == ArSub)
+        if ((node.oper == ArAdd || node.oper == ArSub) && (node.children[0].type.isSubscriptable() || node.children[1].type.isSubscriptable()))
         {
             errorAssert(
-                node.children[0].type.isIntegral() || node.children[0].type.isSubscriptable(),
-                "Check", "Invalid binary operator on non-integral, non-subscriptable object", node.line);
+                node.children[0].type.isIntegral() || node.children[1].type.isIntegral(),
+                "Check", "Invalid operand type in binary operator", node.line);
         }
         else
         {
-            errorAssert(node.children[0].type.isIntegral(), "Check", "Invalid binary operator on non-integral object", node.line);
+            errorAssert(node.children[0].type.isIntegral(), "Check", "Invalid operand type in binary operator", node.line);
+            errorAssert(node.children[1].type.isIntegral(), "Check", "Invalid operand type in binary operator", node.line);
         }
-        errorAssert(node.children[1].type.isIntegral(), "Check", "Invalid binary operator on non-integral object", node.line);
         node.type = node.children[0].type;
         break;
 
@@ -1512,8 +1512,7 @@ void checkExpr(ASTNode& node, Env& env)
         std::cerr << std::endl;
         assert(node.children.size() == 1);
         checkExpr(node.children[0], env);
-        // TODO: Handling of multiple numeric types
-        errorAssert(node.children[0].type.isIntegral(), "Check", "Invalid unary operator on non-integral object", node.line);
+        errorAssert(node.children[0].type.isIntegral(), "Check", "Invalid unary type in binary operator", node.line);
         node.type = node.children[0].type;
         break;
 
@@ -1528,8 +1527,8 @@ void checkExpr(ASTNode& node, Env& env)
     {
         assert(node.children.size() >= 1);
         checkExpr(node.children[0], env);
-        errorAssert(node.children[0].type.isFunction(), "Check", "Calling non-callable object", node.line);
         const TypeNode& funType = node.children[0].type;
+        errorAssert(funType.isFunction(), "Check", "Calling non-callable object", node.line);
         assert(funType.children.size() >= 1);
         errorAssert(
             node.children.size() == funType.children.size(),
@@ -1618,12 +1617,11 @@ void checkStmt(ASTNode& node, Env& env)
 
     case VarDef:
         assert(node.children.size() == 1);
-        checkDef(node, env);
         checkExpr(node.children[0], env);
-        // TODO: Add way to not initialize or to have uniqueptr
-        // errorAssert(
-        //     node.children[0].type.convertableTo(node.type),
-        //     "Check", "RHS type does not match LHS type in variable definition", node.line);
+        checkDef(node, env);
+        errorAssert(
+            node.children[0].type.convertableTo(node.type),
+            "Check", "RHS type does not match LHS type in variable definition", node.line);
         break;
 
     default:
@@ -1654,18 +1652,20 @@ Env checkProgram(ASTNode& node)
 
     env.pushScope();
 
-    // env.define("alloc", );
-    // env.define("free", );
-    // env.define("read", );
-    // env.define("print", );
-    // env.define("flush", );
-    // env.define("exit", );
+    env.define("nullptr", TypeNode(WildcardPtrT));
+
+    env.define("alloc", TypeNode(FunctionT, {TypeNode(WildcardPtrT), TypeNode(Int64T)}));
+    env.define("free", TypeNode(FunctionT, {TypeNode(Int64T), TypeNode(WildcardPtrT)}));
+    env.define("read", TypeNode(FunctionT, {TypeNode(Int64T)}));
+    env.define("print", TypeNode(FunctionT, {TypeNode(Int64T), TypeNode(Int64T)}));
+    env.define("flush", TypeNode(FunctionT, {TypeNode(Int64T)}));
+    env.define("exit", TypeNode(FunctionT, {TypeNode(Int64T), TypeNode(Int64T)}));
 
     for (ASTNode& child : node.children)
     {
         assert(child.isStmt() || child.isDef());
         errorAssert(child.isDef(), "Check", "Illegal statement outside function body", child.line);
-        env.define(child.name, child.type);
+        env.define(child.name, child.type, true, child.line);
     }
 
     for (ASTNode& child : node.children)
@@ -1744,13 +1744,13 @@ bool hasArg(InstrKind kind)
 struct Instr
 {
     InstrKind kind;
-    ValueT arg;
+    WordT arg;
 
     Instr(InstrKind kind)
         : kind(kind)
     {}
 
-    Instr(InstrKind kind, ValueT arg)
+    Instr(InstrKind kind, WordT arg)
         : kind(kind)
         , arg(arg)
     {}
@@ -1788,15 +1788,15 @@ enum DefKind
 struct Definition
 {
     DefKind kind;
-    ValueT addr;
-    ValueT params;
+    WordT addr;
+    WordT params;
 
-    Definition(DefKind kind, ValueT addr)
+    Definition(DefKind kind, WordT addr)
         : kind(kind)
         , addr(addr)
     {}
 
-    Definition(DefKind kind, ValueT addr, ValueT params)
+    Definition(DefKind kind, WordT addr, WordT params)
         : kind(kind)
         , addr(addr)
         , params(params)
@@ -1805,20 +1805,20 @@ struct Definition
 
 struct Env
 {
-    std::vector<ValueT> frameOffsets;
+    std::vector<WordT> frameOffsets;
 
     std::map<std::string, std::vector<Definition>> defs;
     std::vector<std::set<std::string>> scopeDefs;
 
-    std::map<ValueT, ValueT> labelAddrs;
-    ValueT currLabel = 0;
+    std::map<WordT, WordT> labelAddrs;
+    WordT currLabel = 0;
 
-    void pushFrame(ValueT params)
+    void pushFrame(WordT params)
     {
         frameOffsets.push_back(-params);
     }
 
-    void popFrame(ValueT params)
+    void popFrame(WordT params)
     {
         assert(frameOffsets.back() == -params);
         frameOffsets.pop_back();
@@ -1842,7 +1842,7 @@ struct Env
         scopeDefs.pop_back();
     }
 
-    void defineFun(const std::string& name, ValueT addr, ValueT params, int line)
+    void defineFun(const std::string& name, WordT addr, WordT params, int line)
     {
         errorAssert(scopeDefs.back().find(name) == scopeDefs.back().end(), "Compile", "Multiple definitions of function", line);
         defs.emplace(name, {});
@@ -1865,17 +1865,17 @@ struct Env
         return it->second.back();
     }
 
-    ValueT newLabel()
+    WordT newLabel()
     {
         return currLabel++;
     }
 
-    void setLabelAddr(ValueT label, ValueT addr)
+    void setLabelAddr(WordT label, WordT addr)
     {
         labelAddrs[label] = addr;
     }
 
-    ValueT getLabelAddr(ValueT label)
+    WordT getLabelAddr(WordT label)
     {
         auto it = labelAddrs.find(label);
         assert(it != labelAddrs.end());
@@ -1909,7 +1909,7 @@ void compileAddrExpr(const ASTNode& node, Env& env, InstrStream& instrStream)
         assert(node.children[1].isExpr());
         compileExpr(node.children[0], env, instrStream);
         compileExpr(node.children[1], env, instrStream);
-        instrStream.instrs.emplace_back(IPush, sizeof(ValueT));
+        instrStream.instrs.emplace_back(IPush, sizeof(WordT));
         instrStream.instrs.emplace_back(IBinOp, ArMul);
         instrStream.instrs.emplace_back(IBinOp, ArAdd);
         break;
@@ -1949,7 +1949,7 @@ void compileExpr(const ASTNode& node, Env& env, InstrStream& instrStream)
         assert(node.children[1].isExpr());
         if (node.oper == LogAnd || node.oper == LogOr)
         {
-            ValueT endOfSecond = env.newLabel();
+            WordT endOfSecond = env.newLabel();
             instrStream.instrs.emplace_back(IPush, node.oper == LogAnd ? 0 : 1);
             compileExpr(node.children[0], env, instrStream);
             instrStream.instrs.emplace_back(node.oper == LogAnd ? IJzr : IJnz, endOfSecond);
@@ -1982,7 +1982,7 @@ void compileExpr(const ASTNode& node, Env& env, InstrStream& instrStream)
     {
         const Definition& def = env.getDef(node.name, node.line);
         errorAssert(def.kind == DefFun, "Compile", "Cannot call variable", node.line);
-        errorAssert(def.params == (ValueT) node.children.size(), "Compile", "Wrong number of arguments in function call", node.line);
+        errorAssert(def.params == (WordT) node.children.size(), "Compile", "Wrong number of arguments in function call", node.line);
         for (const ASTNode& child : node.children)
         {
             assert(child.isExpr());
@@ -2023,8 +2023,8 @@ void compileStmt(const ASTNode& node, Env& env, InstrStream& instrStream)
     case IfThenElse:
     {
         assert(node.children.size() % 2 == 1 && node.children.size() >= 3);
-        ValueT endOfIf = env.newLabel();
-        ValueT endOfThen;
+        WordT endOfIf = env.newLabel();
+        WordT endOfThen;
         for (size_t i = 0; i < node.children.size(); ++i)
         {
             const ASTNode& child = node.children[i];
@@ -2057,8 +2057,8 @@ void compileStmt(const ASTNode& node, Env& env, InstrStream& instrStream)
         assert(node.children.size() == 2);
         assert(node.children[0].isExpr());
         assert(node.children[1].isBody());
-        ValueT condOfWhile = env.newLabel();
-        ValueT startOfWhile = env.newLabel();
+        WordT condOfWhile = env.newLabel();
+        WordT startOfWhile = env.newLabel();
         instrStream.instrs.emplace_back(IJmp, condOfWhile);
         env.setLabelAddr(startOfWhile, instrStream.instrs.size());
         compileBody(node.children[1], env, instrStream);
@@ -2219,21 +2219,21 @@ InstrStream compileProgram(const ASTNode& node)
     return instrStream;
 }
 
-const ValueT STACK_SIZE = 8 * 1024 * 1024;
+const WordT STACK_SIZE = 8 * 1024 * 1024;
 
-ValueT executeProgram(const InstrStream& instrStream, std::istream& in, std::ostream& out)
+WordT executeProgram(const InstrStream& instrStream, std::istream& in, std::ostream& out)
 {
-    static_assert(sizeof(ValueT) == sizeof(ValueT*));
-    static_assert(sizeof(ValueT) == sizeof(const Instr*));
+    static_assert(sizeof(WordT) == sizeof(WordT*));
+    static_assert(sizeof(WordT) == sizeof(const Instr*));
 
-    std::unique_ptr<ValueT[]> stack = std::make_unique<ValueT[]>(STACK_SIZE);
+    std::unique_ptr<WordT[]> stack = std::make_unique<WordT[]>(STACK_SIZE);
     
     const Instr* pcStart = instrStream.instrs.data();
     const Instr* pc = pcStart;
 
-    ValueT* gp = stack.get();
-    ValueT* bp = stack.get();
-    ValueT* sp = stack.get();
+    WordT* gp = stack.get();
+    WordT* bp = stack.get();
+    WordT* sp = stack.get();
 
     while (true)
     {
@@ -2251,8 +2251,8 @@ ValueT executeProgram(const InstrStream& instrStream, std::istream& in, std::ost
 
         case IBinOp:
         {
-            ValueT right = *--sp;
-            ValueT left = *--sp;
+            WordT right = *--sp;
+            WordT left = *--sp;
             switch (instr.arg)
             {
             case ArAdd:
@@ -2335,7 +2335,7 @@ ValueT executeProgram(const InstrStream& instrStream, std::istream& in, std::ost
 
         case IUnOp:
         {
-            ValueT val = *--sp;
+            WordT val = *--sp;
             switch (instr.arg)
             {
             case UnPlus:
@@ -2361,25 +2361,25 @@ ValueT executeProgram(const InstrStream& instrStream, std::istream& in, std::ost
         }
 
         case IGlobal:
-            *sp++ = reinterpret_cast<ValueT>(gp + instr.arg);
+            *sp++ = reinterpret_cast<WordT>(gp + instr.arg);
             break;
 
         case ILocal:
-            *sp++ = reinterpret_cast<ValueT>(bp + instr.arg);
+            *sp++ = reinterpret_cast<WordT>(bp + instr.arg);
             break;
 
         case ILoad:
         {
-            ValueT ptr = *--sp;
-            *sp++ = *reinterpret_cast<ValueT*>(ptr);
+            WordT ptr = *--sp;
+            *sp++ = *reinterpret_cast<WordT*>(ptr);
             break;
         }
 
         case IStore:
         {
-            ValueT val = *--sp;
-            ValueT ptr = *--sp;
-            *reinterpret_cast<ValueT*>(ptr) = val;
+            WordT val = *--sp;
+            WordT ptr = *--sp;
+            *reinterpret_cast<WordT*>(ptr) = val;
             break;
         }
 
@@ -2389,29 +2389,29 @@ ValueT executeProgram(const InstrStream& instrStream, std::istream& in, std::ost
 
         case IJzr:
         {
-            ValueT val = *--sp;
+            WordT val = *--sp;
             if (val == 0) pc = pcStart + instr.arg;
             break;
         }
 
         case IJnz:
         {
-            ValueT val = *--sp;
+            WordT val = *--sp;
             if (val != 0) pc = pcStart + instr.arg;
             break;
         }
 
         case IAddr:
-            *sp++ = reinterpret_cast<ValueT>(pcStart + instr.arg);
+            *sp++ = reinterpret_cast<WordT>(pcStart + instr.arg);
             break;
 
         case ICall:
         {
             const Instr* newPc = reinterpret_cast<const Instr*>(*--sp);
-            ValueT* newBp = reinterpret_cast<ValueT*>(sp);
-            *sp++ = reinterpret_cast<ValueT>(pc);
-            *sp++ = reinterpret_cast<ValueT>(bp);
-            *sp++ = reinterpret_cast<ValueT>(newBp - instr.arg);
+            WordT* newBp = reinterpret_cast<WordT*>(sp);
+            *sp++ = reinterpret_cast<WordT>(pc);
+            *sp++ = reinterpret_cast<WordT>(bp);
+            *sp++ = reinterpret_cast<WordT>(newBp - instr.arg);
             pc = newPc;
             bp = newBp;
             break;
@@ -2419,26 +2419,26 @@ ValueT executeProgram(const InstrStream& instrStream, std::istream& in, std::ost
 
         case IReturn:
         {
-            ValueT val = *--sp;
-            ValueT* oldBp = reinterpret_cast<ValueT*>(bp);
+            WordT val = *--sp;
+            WordT* oldBp = reinterpret_cast<WordT*>(bp);
             pc = reinterpret_cast<const Instr*>(oldBp[0]);
-            bp = reinterpret_cast<ValueT*>(oldBp[1]);
-            sp = reinterpret_cast<ValueT*>(oldBp[2]);
+            bp = reinterpret_cast<WordT*>(oldBp[1]);
+            sp = reinterpret_cast<WordT*>(oldBp[2]);
             *sp++ = val;
             break;
         }
 
         case IAlloc:
         {
-            ValueT len = *--sp;
-            *sp++ = reinterpret_cast<ValueT>(new ValueT[len]);
+            WordT len = *--sp;
+            *sp++ = reinterpret_cast<WordT>(new WordT[len]);
             break;
         }
 
         case IFree:
         {
-            ValueT ptr = *--sp;
-            delete[] reinterpret_cast<ValueT*>(ptr);
+            WordT ptr = *--sp;
+            delete[] reinterpret_cast<WordT*>(ptr);
             break;
         }
 
@@ -2497,7 +2497,7 @@ int main(int argc, char *argv[])
 
     std::cerr << "Program IO:\n\n";
 
-    ValueT retCode = executeProgram(instrStream, std::cin, std::cout);
+    WordT retCode = executeProgram(instrStream, std::cin, std::cout);
 
     std::cerr << "\nProgram return code:\n\n";
     std::cerr << retCode << "\n";*/

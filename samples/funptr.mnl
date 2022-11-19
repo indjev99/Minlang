@@ -1,0 +1,21 @@
+fun int(int()*) callGen(gen) =
+    return (*gen)();
+end
+
+fun int() zero() =
+    return 0;
+end
+
+fun int()*(int) selectGen(useRead) =
+    if useRead then
+        return &read;
+    else
+        return &zero;
+    end
+end
+
+fun int() main() =
+    var int useRead = read(); 
+    var int()* gen = selectGen(useRead);
+    print(callGen(gen));
+end

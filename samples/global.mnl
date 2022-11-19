@@ -1,12 +1,12 @@
-var sum = 0;
+var int sum = 0;
 
-fun add(x) =
+fun int(int) add(x) =
     sum = sum + x;
 end
 
-fun main() =
+fun int() main() =
     while 1 do
-        var x = read();
+        var int x = read();
         add(x);
         print(sum);
         flush();

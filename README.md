@@ -1,8 +1,8 @@
 # Minlang
-A small imperative programming language.
+A small strongly typed imperative programming language.
 
 Semantics:
-- All values are signed 64 bit intergers that can also be interpreted as pointers.
+- All types are represented as 64 bit values.
 - Function arguments are passed by value and are computed from left to right.
 
 Lexing:
@@ -12,13 +12,17 @@ Lexing:
 Grammar:
 
 ```
-PROGRAM ::= (VAR_DEF | FUN_DEF)*
+PROGRAM ::=
+    (VAR_DEF | FUN_DEF)*
 
-VAR_DEF ::= var NAME = EXPR;
+VAR_DEF ::=
+    var VAL_TYPE NAME = EXPR;
 
-FUN_DEF ::= fun NAME "(" (NAME (, NAME)*) ")" = BODY end
+FUN_DEF ::=
+    fun FUN_TYPE NAME "(" (NAME (, NAME)*) ")" = BODY end
 
-BODY ::= (VAR_DEF | STMT)*
+BODY ::=
+    (VAR_DEF | STMT)*
 
 STMT ::=
     EXPR;
@@ -30,7 +34,7 @@ STMT ::=
 EXPR ::=
     ADDR_EXPR
   | NUMBER
-  | NAME "(" (EXPR (, EXPR)*) ")"
+  | ADDR_EXPR "(" (EXPR (, EXPR)*) ")"
   | EXPR BIN_OP EXPR
   | UN_OP EXPR
   | &ADDR_EXPR
@@ -41,11 +45,23 @@ ADDR_EXPR ::=
   | EXPR[EXPR]
   | *EXPR
   | "(" ADDR_EXPR ")"
+
+TYPE ::=
+    VAL_TYPE | FUN_TYPE
+
+VAL_TYPE ::=
+    int
+  | wildcardPtr
+  | TYPE*
+
+FUN_TYPE ::=
+    TYPE "(" (TYPE (, TYPE)*) ")"
 ```
 
 Subscripting and the oparators have the usual precedences.
 
-Primive functions:
+Primive variables and functions:
+- `nullptr()`
 - `alloc(n)`
 - `free(ptr)`
 - `read()`
@@ -55,10 +71,8 @@ Primive functions:
 
 Future plans:
 - Imports
-- Simple types: int64, pointers
 - Custom struct types
 - Arrays
-- Function pointers
 - Named arguments
 - Other 64 bit primitive types
 - Non 64 bit primitive types (requires handling alignment)

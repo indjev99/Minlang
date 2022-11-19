@@ -1,0 +1,6 @@
+fun int() main() =
+    var int x = 10;
+    var int* xPtr = &x;
+    var int** xPtrPtr = &xPtr;
+    print(**xPtrPtr);
+end

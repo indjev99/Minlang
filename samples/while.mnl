@@ -1,5 +1,5 @@
-fun isPrime(n) =
-    var i = 2;
+fun int(int) isPrime(n) =
+    var int i = 2;
     while i < n do
         if n % i == 0 then
             return 0;
@@ -10,8 +10,8 @@ fun isPrime(n) =
 end
 
 
-fun main() =
-    var n = 0;
+fun int() main() =
+    var int n = 2;
     while 1 do
         if isPrime(n) then
             print(n);

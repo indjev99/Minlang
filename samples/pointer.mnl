@@ -1,9 +1,9 @@
-fun inc(ptr) =
+fun int(int*) inc(ptr) =
     *ptr = *ptr + 1;
 end
 
-fun main() =
-    var n = 0;
+fun int() main() =
+    var int n = 0;
     inc(&n);
     print(n);
 end

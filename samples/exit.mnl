@@ -1,12 +1,12 @@
-fun readAssertPostive() =
-    var x = read();
+fun int() readAssertPostive() =
+    var int x = read();
     if x <= 0 then
         exit(-1);
     end
     return x;
 end
 
-fun main() =
-    var x = readAssertPostive();
+fun int() main() =
+    var int x = readAssertPostive();
     print(x);
 end

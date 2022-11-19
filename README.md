@@ -34,7 +34,7 @@ STMT ::=
 EXPR ::=
     ADDR_EXPR
   | NUMBER
-  | ADDR_EXPR "(" (EXPR (, EXPR)*) ")"
+  | EXPR "(" (EXPR (, EXPR)*) ")"
   | EXPR BIN_OP EXPR
   | UN_OP EXPR
   | &ADDR_EXPR
@@ -61,18 +61,19 @@ FUN_TYPE ::=
 Subscripting and the oparators have the usual precedences.
 
 Primive variables and functions:
-- `nullptr()`
-- `alloc(n)`
-- `free(ptr)`
-- `read()`
-- `print(x)`
-- `flush()`
-- `exit(code)`
+- `int() nullptr()`
+- `wildcardPtr(int) alloc(n)`
+- `int(wildcardPtr) free(ptr)`
+- `int() read()`
+- `int(int) print(x)`
+- `int() flush()`
+- `int(int) exit(code)`
 
 Future plans:
+- Arrays
+- Tuples
 - Imports
 - Custom struct types
-- Arrays
 - Named arguments
 - Other 64 bit primitive types
 - Non 64 bit primitive types (requires handling alignment)

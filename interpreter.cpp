@@ -1755,6 +1755,9 @@ DefEnv checkProgram(ASTNode& node)
     return dEnv;
 }
 
+// return address and base pointer
+const WordT extraFrameSize = 2;
+
 enum InstrKind
 {
     IPush,
@@ -1811,17 +1814,21 @@ struct Instr
 
     Instr(InstrKind kind)
         : kind(kind)
-    {}
+    {
+        assert(!hasArg());
+    }
 
     Instr(InstrKind kind, WordT arg)
         : kind(kind)
         , arg(arg)
-    {}
+    {
+        assert(hasArg());
+    }
 
     bool hasArg() const
     {
         return kind == IPush || kind == ISpAdd || kind == IBinOp || kind == IUnOp || kind == IGlobal || kind == ILocal
-            || kind == IJmp || kind == IJzr || kind == IJnz || kind == IAddr || kind == ICall;
+            || kind == IJmp || kind == IJzr || kind == IJnz || kind == IAddr || kind == IReturn;
     }
 
     void print(std::ostream& out) const
@@ -1921,15 +1928,15 @@ struct Locator
 struct LocAllocator
 {
     LocKind locKind;
-    WordT frameOffset;
+    WordT frameSize;
     WordT currOffset;
     WordT currLabel = 0;
 
-    void setFrame(LocKind locKind, WordT params = 0)
+    void setFrame(LocKind locKind, WordT frameSize = 0)
     {
         this->locKind = locKind;
-        frameOffset = -params;
-        currOffset = frameOffset;
+        this->frameSize = frameSize;
+        currOffset = -frameSize;
     }
 
     Location pushVar()
@@ -2036,7 +2043,7 @@ void compileValExpr(const ASTNode& node, InstrStream& instrStream, CompileEnv& c
             compileValExpr(node.children[i], instrStream, cEnv);
         }
         compileValExpr(node.children[0], instrStream, cEnv);
-        instrStream.instrs.emplace_back(ICall, node.children.size() - 1);
+        instrStream.instrs.emplace_back(ICall);
         break;
 
     default:
@@ -2119,7 +2126,7 @@ void compileStmt(const ASTNode& node, InstrStream& instrStream, CompileEnv& cEnv
     case ReturnVal:
         assert(node.children.size() == 1);
         compileValExpr(node.children[0], instrStream, cEnv);
-        instrStream.instrs.emplace_back(IReturn);
+        instrStream.instrs.emplace_back(IReturn, cEnv.locAllocator.frameSize);
         break;
 
     case VarDef:
@@ -2180,16 +2187,14 @@ void compileFunDef(const ASTNode& node, InstrStream& instrStream, CompileEnv& cE
     assert(node.children.size() == 1);
 
     compileFunSetLabel(node, instrStream, cEnv);
-    cEnv.locAllocator.setFrame(LocLocal, node.params.size() + 3);
+    cEnv.locAllocator.setFrame(LocLocal, node.params.size() + extraFrameSize);
     compileParams(node, instrStream, cEnv);
-    cEnv.locAllocator.pushVar(); // return address
-    cEnv.locAllocator.pushVar(); // old base pointer
-    cEnv.locAllocator.pushVar(); // old stack pointer
+    for (int i = 0; i < extraFrameSize; ++i) cEnv.locAllocator.pushVar();
     size_t iSpAddAddr = instrStream.instrs.size();
     instrStream.instrs.emplace_back(ISpAdd, 0);
     compileBody(node.children[0], instrStream, cEnv);
     instrStream.instrs.emplace_back(IPush, 0);
-    instrStream.instrs.emplace_back(IReturn);
+    instrStream.instrs.emplace_back(IReturn, cEnv.locAllocator.frameSize);
     instrStream.instrs[iSpAddAddr].arg = cEnv.locAllocator.currOffset;
 }
 
@@ -2201,49 +2206,49 @@ void compileIntrDef(const ASTNode& node, InstrStream& instrStream, CompileEnv& c
     if (node.name == "nullptr")
     {
         instrStream.instrs.emplace_back(IPush, 0);
-        instrStream.instrs.emplace_back(IReturn);
+        instrStream.instrs.emplace_back(IReturn, extraFrameSize);
     }
     else if (node.name == "alloc")
     {
-        instrStream.instrs.emplace_back(ILocal, -4);
+        instrStream.instrs.emplace_back(ILocal, -(extraFrameSize + 1));
         instrStream.instrs.emplace_back(ILoad);
         instrStream.instrs.emplace_back(IAlloc);
-        instrStream.instrs.emplace_back(IReturn);
+        instrStream.instrs.emplace_back(IReturn, extraFrameSize + 1);
     }
     else if (node.name == "free")
     {
-        instrStream.instrs.emplace_back(ILocal, -4);
+        instrStream.instrs.emplace_back(ILocal, -(extraFrameSize + 1));
         instrStream.instrs.emplace_back(ILoad);
         instrStream.instrs.emplace_back(IFree);
         instrStream.instrs.emplace_back(IPush, 0);
-        instrStream.instrs.emplace_back(IReturn);
+        instrStream.instrs.emplace_back(IReturn, extraFrameSize + 1);
     }
     else if (node.name == "read")
     {
         instrStream.instrs.emplace_back(IRead);
-        instrStream.instrs.emplace_back(IReturn);
+        instrStream.instrs.emplace_back(IReturn, extraFrameSize);
     }
     else if (node.name == "print")
     {
-        instrStream.instrs.emplace_back(ILocal, -4);
+        instrStream.instrs.emplace_back(ILocal, -(extraFrameSize + 1));
         instrStream.instrs.emplace_back(ILoad);
         instrStream.instrs.emplace_back(IPrint);
         instrStream.instrs.emplace_back(IPush, 0);
-        instrStream.instrs.emplace_back(IReturn);
+        instrStream.instrs.emplace_back(IReturn, extraFrameSize + 1);
     }
     else if (node.name == "flush")
     {
         instrStream.instrs.emplace_back(IFlush);
         instrStream.instrs.emplace_back(IPush, 0);
-        instrStream.instrs.emplace_back(IReturn);
+        instrStream.instrs.emplace_back(IReturn, extraFrameSize);
     }
     else if (node.name == "exit")
     {
-        instrStream.instrs.emplace_back(ILocal, -4);
+        instrStream.instrs.emplace_back(ILocal, -(extraFrameSize + 1));
         instrStream.instrs.emplace_back(ILoad);
         instrStream.instrs.emplace_back(IExit);
         instrStream.instrs.emplace_back(IPush, 0);
-        instrStream.instrs.emplace_back(IReturn);
+        instrStream.instrs.emplace_back(IReturn, extraFrameSize + 1);
     }
     else assert(false);
 }
@@ -2282,7 +2287,7 @@ InstrStream compileProgram(const ASTNode& node)
         if (child.kind == VarDef) compileStmt(child, instrStream, cEnv);
     }
     instrStream.instrs.emplace_back(IAddr, cEnv.locator.getLoc(node.def).addr);
-    instrStream.instrs.emplace_back(ICall, 0);
+    instrStream.instrs.emplace_back(ICall);
     instrStream.instrs.emplace_back(IExit);
 
     instrStream.instrs[iSpAddAddr].arg = cEnv.locAllocator.currOffset;
@@ -2504,10 +2509,8 @@ WordT executeProgram(const InstrStream& instrStream, std::istream& in, std::ostr
         case ICall:
         {
             const Instr* newPc = reinterpret_cast<const Instr*>(*--sp);
-            WordT* oldSp = reinterpret_cast<WordT*>(sp);
             *sp++ = reinterpret_cast<WordT>(pc);
             *sp++ = reinterpret_cast<WordT>(bp);
-            *sp++ = reinterpret_cast<WordT>(oldSp - instr.arg);
             pc = newPc;
             bp = sp;
             break;
@@ -2517,9 +2520,9 @@ WordT executeProgram(const InstrStream& instrStream, std::istream& in, std::ostr
         {
             WordT val = *--sp;
             WordT* oldBp = reinterpret_cast<WordT*>(bp);
-            pc = reinterpret_cast<const Instr*>(oldBp[-3]);
-            bp = reinterpret_cast<WordT*>(oldBp[-2]);
-            sp = reinterpret_cast<WordT*>(oldBp[-1]);
+            pc = reinterpret_cast<const Instr*>(oldBp[-2]);
+            bp = reinterpret_cast<WordT*>(oldBp[-1]);
+            sp = oldBp - instr.arg;
             *sp++ = val;
             break;
         }

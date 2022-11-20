@@ -412,7 +412,7 @@ struct TypeNode
     TypeKind kind;
     std::string name;
     std::vector<TypeNode> children;
-    size_t arrLen;
+    WordT arrLen;
     int remaining;
 
     TypeNode()
@@ -484,11 +484,17 @@ struct TypeNode
         return isDereferenceable() && children[0].isValue();
     }
 
-    bool structMatch(const TypeNode& other) const
+    bool topMatch(const TypeNode& other) const
     {
         if (kind != other.kind) return false;
         if (kind == CustomT && name != other.name) return false;
         if (children.size() != other.children.size()) return false;
+        return true;
+    }
+
+    bool structMatch(const TypeNode& other) const
+    {
+        if (!topMatch(other)) return false;
         for (size_t i = 0; i < children.size(); ++i)
         {
             if (!children[i].structMatch(other.children[i])) return false;
@@ -496,12 +502,18 @@ struct TypeNode
         return true;
     }
 
-    bool convertableTo(const TypeNode& other) const
+    bool isConvertableTo(const TypeNode& other) const
     {
         if ((kind == PointerT && other.kind == WildcardPtrT) ||
             (kind == WildcardPtrT && other.kind == PointerT))
             return true;
-        return structMatch(other);
+        bool surfaceMatch = topMatch(other) ||!(kind == PointerT && other.kind == ArrayT);
+        if (!surfaceMatch) return false;
+        for (size_t i = 0; i < children.size(); ++i)
+        {
+            if (!children[i].structMatch(other.children[i])) return false;
+        }
+        return true;
     }
 
     bool isComplete() const
@@ -1056,16 +1068,8 @@ ASTNode parseProgram(const TokenStream& tokenStream)
                         last.type = std::move(lastT);
                         typeStack.clear();
                         last.name = token.name;
-                        if (last.kind == VarDef)
-                        {
-                            errorAssert(last.type.isValue(), "Parse", "Expected value type in variable definition", line);
-                            defState = DefAssign;
-                        }
-                        else if (last.kind == FunDef)
-                        {
-                            errorAssert(last.type.isFunction(), "Parse", "Expected function type in fuction definition", line);
-                            defState = DefParamList;
-                        }
+                        if (last.kind == VarDef) defState = DefAssign;
+                        else if (last.kind == FunDef) defState = DefParamList;
                         else assert(false);
                     }
                     else errorAssert(false, "Parse", "Unexpected name in type", line);
@@ -1085,7 +1089,6 @@ ASTNode parseProgram(const TokenStream& tokenStream)
                 case LSub:
                 {
                     errorAssert(lastT.isComplete(), "Parse", "Unexpected opening bracket square in type", line);
-                    errorAssert(lastT.isValue(), "Parse", "Expected value type in array type", line);
                     TypeNode baseType = std::move(lastT);
                     typeStack.pop_back();
                     typeStack.emplace_back(ArrayT, -3);
@@ -1095,7 +1098,6 @@ ASTNode parseProgram(const TokenStream& tokenStream)
 
                 case Number:
                     errorAssert(lastT.kind == ArrayT && lastT.remaining == -3, "Parse", "Unexpected number in type", line);
-                    errorAssert(token.number >= 0, "Parse", "Array length must be positive", line);
                     lastT.arrLen = token.number;
                     lastT.remaining = -2;
                     break;
@@ -1110,8 +1112,6 @@ ASTNode parseProgram(const TokenStream& tokenStream)
                     errorAssert(lastT.isComplete(), "Parse", "Unexpected opening bracket in type", line);
                     TypeNode outType = std::move(lastT);
                     typeStack.pop_back();
-                    errorAssert(outType.isValue(), "Parse", "Expected value type in return type", line);
-                    errorAssert(outType.isCopyable(), "Parse", "Expected copyable type in return type", line);
                     typeStack.emplace_back(FunctionT, -1);
                     TypeNode& lastT = typeStack.back();
                     lastT.addChild(std::move(outType));
@@ -1125,8 +1125,6 @@ ASTNode parseProgram(const TokenStream& tokenStream)
                     typeStack.pop_back();
                     TypeNode& lastT = typeStack.back();
                     errorAssert(!lastT.isComplete(), "Parse", "Unexpected comma in type", line);
-                    errorAssert(inType.isValue(), "Parse", "Expected value type in parameter type", line);
-                    errorAssert(inType.isCopyable(), "Parse", "Expected copyable type in parameter type", line);
                     lastT.addChild(std::move(inType));
                     break;
                 }
@@ -1139,8 +1137,6 @@ ASTNode parseProgram(const TokenStream& tokenStream)
                         typeStack.pop_back();
                         TypeNode& lastT = typeStack.back();
                         errorAssert(!lastT.isComplete(), "Parse", "Unexpected closing bracket in type", line);
-                        errorAssert(inType.isValue(), "Parse", "Expected value type in parameter type", line);
-                        errorAssert(inType.isCopyable(), "Parse", "Expected copyable type in parameter type", line);
                         lastT.addChild(std::move(inType));
                     }
                     TypeNode& lastT = typeStack.back();
@@ -1505,9 +1501,9 @@ void checkAddrExpr(ASTNode& node, DefEnv& dEnv)
     {
         assert(node.children.size() == 2);
         checkValExpr(node.children[0], dEnv);
-        errorAssert(node.children[0].type.isSubscriptable(), "Check", "Subscripting non-subsriptable object", node.line);
+        errorAssert(node.children[0].type.isSubscriptable(), "Check", "Subscripting non-subsriptable type", node.line);
         checkValExpr(node.children[1], dEnv);
-        errorAssert(node.children[1].type.isIntegral(), "Check", "Subscripting with non-integral object", node.line);
+        errorAssert(node.children[1].type.isIntegral(), "Check", "Subscripting with non-integral type", node.line);
         assert(node.children[0].type.children.size() == 1);
         node.kind = BinOperator;
         node.oper = ArAdd;
@@ -1521,7 +1517,7 @@ void checkAddrExpr(ASTNode& node, DefEnv& dEnv)
     case DerefOp:
         assert(node.children.size() == 1);
         checkValExpr(node.children[0], dEnv);
-        errorAssert(node.children[0].type.isDereferenceable(), "Check", "Dereferencing non-dereferenceable object", node.line);
+        errorAssert(node.children[0].type.isDereferenceable(), "Check", "Dereferencing non-dereferenceable type", node.line);
         assert(node.children[0].type.children.size() == 1);
         node.type = node.children[0].type.children[0];
         break;
@@ -1594,7 +1590,7 @@ void checkValExpr(ASTNode& node, DefEnv& dEnv)
         assert(node.children.size() >= 1);
         checkValExpr(node.children[0], dEnv);
         const TypeNode& funType = node.children[0].type;
-        errorAssert(funType.isFunction(), "Check", "Calling non-callable object", node.line);
+        errorAssert(funType.isFunction(), "Check", "Calling non-callable type", node.line);
         assert(funType.children.size() >= 1);
         errorAssert(
             node.children.size() == funType.children.size(),
@@ -1604,7 +1600,7 @@ void checkValExpr(ASTNode& node, DefEnv& dEnv)
         {
             checkValExpr(node.children[i], dEnv);
             errorAssert(
-                node.children[i].type.convertableTo(funType.children[i]),
+                node.children[i].type.isConvertableTo(funType.children[i]),
                 "Check", "Argument type does not match parameter type in function call", node.line);
         }   
         break;
@@ -1617,12 +1613,59 @@ void checkValExpr(ASTNode& node, DefEnv& dEnv)
     node.checkDone = true;
 }
 
+void checkTypeRec(const TypeNode& node, DefEnv& dEnv, int line)
+{
+    switch (node.kind)
+    {
+    case DummyT:
+        assert(false);
+        break;
+
+    case PointerT:
+        assert(node.children.size() == 1);
+        checkTypeRec(node.children[0], dEnv, line);
+        break;
+
+    case ArrayT:
+        assert(node.children.size() == 1);
+        errorAssert(node.children[0].isValue(), "Check", "Array type is not a value", line);
+        errorAssert(node.arrLen >= 0, "Check", "Array length is negative", line);
+        checkTypeRec(node.children[0], dEnv, line);
+        break;
+
+    case FunctionT:
+        assert(node.children.size() >= 1);
+        errorAssert(node.children[0].isValue(), "Check", "Return type is not a value", line);
+        errorAssert(node.children[0].isCopyable(), "Check", "Return type is not copyable", line);
+        for (size_t i = 0; i < node.children.size(); ++i)
+        {
+            errorAssert(node.children[i].isValue(), "Check", "Parameter type is not a value", line);
+            errorAssert(node.children[i].isCopyable(), "Check", "Parameter type is not copyable", line);    
+        }
+        break;
+
+    case CustomT:
+        assert(node.children.size() == 0);
+        errorAssert(true, "Check", "Custom types not yet supported", line);
+        break;
+
+    default:
+        assert(node.children.size() == 0);
+    }
+}
+
 void checkDefType(ASTNode& node, DefEnv& dEnv, bool assertUnique)
 {
     assert(node.isDef() && node.isComplete());
-    assert((node.kind == FunDef || node.kind == IntrDef) == (node.type.isFunction()));
 
-    errorAssert(node.type.kind != CustomT, "Check", "Custom types not yet supported", node.line);
+    if (node.kind == VarDef)
+        errorAssert(node.type.isValue(), "Check", "Expected value type in variable definition", node.line);
+    else if (node.kind == FunDef || node.kind == IntrDef)
+        errorAssert(node.type.isFunction(), "Check", "Expected function type in fuction definition", node.line);
+    else assert(false);
+
+    checkTypeRec(node.type, dEnv, node.line);
+
     node.def = dEnv.define(node.name, node.type, assertUnique, node.line);
 }
 
@@ -1647,7 +1690,7 @@ void checkStmt(ASTNode& node, DefEnv& dEnv)
         checkAddrExpr(node.children[0], dEnv);
         checkValExpr(node.children[1], dEnv);
         errorAssert(
-            node.children[1].type.convertableTo(node.children[0].type),
+            node.children[1].type.isConvertableTo(node.children[0].type),
             "Check", "RHS type does not match LHS type in assignment", node.line);
         errorAssert(node.children[0].type.isValue(), "Check", "Non-value type in assignment", node.line);
         errorAssert(node.children[0].type.isCopyable(), "Check", "Non-copyable type in assignment", node.line);
@@ -1679,7 +1722,7 @@ void checkStmt(ASTNode& node, DefEnv& dEnv)
         assert(node.children.size() == 1);
         checkValExpr(node.children[0], dEnv);
         errorAssert(
-            node.children[0].type.convertableTo(dEnv.retType),
+            node.children[0].type.isConvertableTo(dEnv.retType),
             "Check", "Return value type does not match function return type", node.line);
         break;
 
@@ -1689,7 +1732,7 @@ void checkStmt(ASTNode& node, DefEnv& dEnv)
         {
             checkValExpr(node.children[0], dEnv);
             errorAssert(
-                node.children[0].type.convertableTo(node.type),
+                node.children[0].type.isConvertableTo(node.type),
                 "Check", "RHS type does not match LHS type in variable definition", node.line);
         }
         break;

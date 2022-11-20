@@ -2,7 +2,8 @@
 A small strongly typed imperative programming language.
 
 Semantics:
-- All types are represented as 64 bit values.
+- All simple types are represented as 64 bit values.
+- Arrays decay to pointers when in an expression (plan is to change that).
 - Function arguments are passed by value and are computed from left to right.
 
 Lexing:

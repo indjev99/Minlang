@@ -393,9 +393,10 @@ enum TypeKind
 {
     DummyT,
     Int64T,
-    PointerT,
-    FunctionT,
     WildcardPtrT,
+    PointerT,
+    ArrayT,
+    FunctionT,
     CustomT
 };
 
@@ -411,6 +412,7 @@ struct TypeNode
     TypeKind kind;
     std::string name;
     std::vector<TypeNode> children;
+    size_t arrLen;
     int remaining;
 
     TypeNode()
@@ -454,7 +456,7 @@ struct TypeNode
 
     bool isValue() const
     {
-        return kind != DummyT && kind != FunctionT;
+        return kind != FunctionT;
     }
 
     bool isFunction() const
@@ -462,24 +464,24 @@ struct TypeNode
         return kind == FunctionT;
     }
 
-    bool isPointer() const
-    {
-        return kind == PointerT;
-    }
-
-    bool isValuePointer() const
-    {
-        return kind == PointerT && children[0].isValue();
-    }
-
-    bool isFunctionPointer() const
-    {
-        return kind == PointerT && children[0].isFunction();
-    }
-
     bool isIntegral() const
     {
         return kind == Int64T;
+    }
+
+    bool isDereferenceable() const
+    {
+        return kind == PointerT || kind == ArrayT;
+    }
+
+    bool isCopyable() const
+    {
+        return kind != FunctionT && kind != ArrayT;
+    }
+
+    bool isSubscriptable() const
+    {
+        return isDereferenceable() && children[0].isValue();
     }
 
     bool structMatch(const TypeNode& other) const
@@ -507,6 +509,23 @@ struct TypeNode
         return kind != DummyT && remaining == 0;
     }
 
+    WordT typeSize() const
+    {
+        switch (kind)
+        {
+        case Int64T:
+        case PointerT:
+            return sizeof(WordT);
+
+        case ArrayT:
+            return arrLen * children[0].typeSize();
+
+        default:
+            assert(false);
+            return 0;
+        }
+    }
+
     void addChild(const TypeNode& child)
     {
         assert(remaining != 0 && child.isComplete());
@@ -532,6 +551,13 @@ struct TypeNode
         case PointerT:
             if (children.size() > 0) children[0].print(out);
             out << "*";
+            break;
+
+        case ArrayT:
+            if (children.size() > 0) children[0].print(out);
+            out << "[";
+            if (children[0].isComplete()) out << arrLen;
+            out << "]";
             break;
 
         case FunctionT:
@@ -1019,11 +1045,11 @@ ASTNode parseProgram(const TokenStream& tokenStream)
                 switch (token.kind)
                 {
                 case Name:
-                    if (!lastT.isComplete())
+                    if (!lastT.isComplete() && lastT.remaining >= -1)
                     {
                         typeStack.emplace_back(token.name);
                     }
-                    else
+                    else if (lastT.isComplete())
                     {
                         assert(typeStack.size() >= 2 && typeStack.front().kind == DummyT);
                         errorAssert(typeStack.size() == 2, "Parse", "Unexpected name in type", line);
@@ -1042,25 +1068,50 @@ ASTNode parseProgram(const TokenStream& tokenStream)
                         }
                         else assert(false);
                     }
+                    else errorAssert(false, "Parse", "Unexpected name in type", line);
                     break;
 
                 case Op:
                 {
                     errorAssert(isPointerOperator(token.oper), "Parse", "Unexpected operator in type", line);
                     errorAssert(lastT.isComplete(), "Parse", "Unexpected asterisk in type", line);
-                    TypeNode baseType = std::move(typeStack.back());
+                    TypeNode baseType = std::move(lastT);
                     typeStack.pop_back();
                     typeStack.emplace_back(PointerT, 1);
                     typeStack.back().addChild(std::move(baseType));
                     break;
                 }
 
+                case LSub:
+                {
+                    errorAssert(lastT.isComplete(), "Parse", "Unexpected opening bracket square in type", line);
+                    errorAssert(lastT.isValue(), "Parse", "Expected value type in array type", line);
+                    TypeNode baseType = std::move(lastT);
+                    typeStack.pop_back();
+                    typeStack.emplace_back(ArrayT, -3);
+                    typeStack.back().addChild(std::move(baseType));
+                    break;
+                }
+
+                case Number:
+                    errorAssert(lastT.kind == ArrayT && lastT.remaining == -3, "Parse", "Unexpected number in type", line);
+                    errorAssert(token.number >= 0, "Parse", "Array length must be positive", line);
+                    lastT.arrLen = token.number;
+                    lastT.remaining = -2;
+                    break;
+
+                case RSub:
+                    errorAssert(lastT.kind == ArrayT && lastT.remaining == -2, "Parse", "Unexpected closing square bracket in type", line);
+                    lastT.remaining = 0;
+                    break;
+
                 case LBrack:
                 {
                     errorAssert(lastT.isComplete(), "Parse", "Unexpected opening bracket in type", line);
-                    TypeNode outType = std::move(typeStack.back());
+                    TypeNode outType = std::move(lastT);
                     typeStack.pop_back();
                     errorAssert(outType.isValue(), "Parse", "Expected value type in return type", line);
+                    errorAssert(outType.isCopyable(), "Parse", "Expected copyable type in return type", line);
                     typeStack.emplace_back(FunctionT, -1);
                     TypeNode& lastT = typeStack.back();
                     lastT.addChild(std::move(outType));
@@ -1070,11 +1121,12 @@ ASTNode parseProgram(const TokenStream& tokenStream)
                 case Comma:
                 {
                     errorAssert(lastT.isComplete(), "Parse", "Unexpected comma in type", line);
-                    TypeNode inType = std::move(typeStack.back());
+                    TypeNode inType = std::move(lastT);
                     typeStack.pop_back();
                     TypeNode& lastT = typeStack.back();
                     errorAssert(!lastT.isComplete(), "Parse", "Unexpected comma in type", line);
                     errorAssert(inType.isValue(), "Parse", "Expected value type in parameter type", line);
+                    errorAssert(inType.isCopyable(), "Parse", "Expected copyable type in parameter type", line);
                     lastT.addChild(std::move(inType));
                     break;
                 }
@@ -1083,11 +1135,12 @@ ASTNode parseProgram(const TokenStream& tokenStream)
                 {
                     if (lastT.isComplete())
                     {
-                        TypeNode inType = std::move(typeStack.back());
+                        TypeNode inType = std::move(lastT);
                         typeStack.pop_back();
                         TypeNode& lastT = typeStack.back();
                         errorAssert(!lastT.isComplete(), "Parse", "Unexpected closing bracket in type", line);
                         errorAssert(inType.isValue(), "Parse", "Expected value type in parameter type", line);
+                        errorAssert(inType.isCopyable(), "Parse", "Expected copyable type in parameter type", line);
                         lastT.addChild(std::move(inType));
                     }
                     TypeNode& lastT = typeStack.back();
@@ -1135,7 +1188,12 @@ ASTNode parseProgram(const TokenStream& tokenStream)
                 break;
 
             case DefAssign:
-                errorAssert(token.kind == Assign, "Parse", "Expected assignment in defition", line);
+                if (token.kind == Semicol && last.kind == VarDef)
+                {
+                    assert(last.remaining == 1);
+                    --last.remaining;
+                }
+                else errorAssert(token.kind == Assign, "Parse", "Expected assignment in defition", line);
                 defState = None;
                 break;
 
@@ -1447,7 +1505,7 @@ void checkAddrExpr(ASTNode& node, DefEnv& dEnv)
     {
         assert(node.children.size() == 2);
         checkValExpr(node.children[0], dEnv);
-        errorAssert(node.children[0].type.isValuePointer(), "Check", "Subscripting non-subsriptable object", node.line);
+        errorAssert(node.children[0].type.isSubscriptable(), "Check", "Subscripting non-subsriptable object", node.line);
         checkValExpr(node.children[1], dEnv);
         errorAssert(node.children[1].type.isIntegral(), "Check", "Subscripting with non-integral object", node.line);
         assert(node.children[0].type.children.size() == 1);
@@ -1463,7 +1521,7 @@ void checkAddrExpr(ASTNode& node, DefEnv& dEnv)
     case DerefOp:
         assert(node.children.size() == 1);
         checkValExpr(node.children[0], dEnv);
-        errorAssert(node.children[0].type.isPointer(), "Check", "Dereferencing non-dereferenceable object", node.line);
+        errorAssert(node.children[0].type.isDereferenceable(), "Check", "Dereferencing non-dereferenceable object", node.line);
         assert(node.children[0].type.children.size() == 1);
         node.type = node.children[0].type.children[0];
         break;
@@ -1496,15 +1554,15 @@ void checkValExpr(ASTNode& node, DefEnv& dEnv)
         assert(node.children.size() == 2);
         checkValExpr(node.children[0], dEnv);
         checkValExpr(node.children[1], dEnv);
-        if ((node.oper == ArAdd || node.oper == ArSub) && (node.children[0].type.isValuePointer() || node.children[1].type.isValuePointer()))
+        if ((node.oper == ArAdd || node.oper == ArSub) && (node.children[0].type.isSubscriptable() || node.children[1].type.isSubscriptable()))
         {
             errorAssert(
                 node.children[0].type.isIntegral() || node.children[1].type.isIntegral(),
                 "Check", "Invalid operand type in binary operator", node.line);
-            if (node.children[1].type.isValuePointer()) std::swap(node.children[0], node.children[1]);
+            if (node.children[1].type.isSubscriptable()) std::swap(node.children[0], node.children[1]);
             ASTNode mulNode(BinOperator, ArMul, 2, node.line);
             mulNode.addExpr(std::move(node.children[1]));
-            ASTNode valNode(ConstNumber, sizeof(WordT), 0, node.line);
+            ASTNode valNode(ConstNumber, node.children[0].type.children[0].typeSize(), 0, node.line);
             mulNode.addExpr(std::move(valNode));
             node.children[1] = std::move(mulNode);
             checkValExpr(node.children[1], dEnv);
@@ -1592,6 +1650,7 @@ void checkStmt(ASTNode& node, DefEnv& dEnv)
             node.children[1].type.convertableTo(node.children[0].type),
             "Check", "RHS type does not match LHS type in assignment", node.line);
         errorAssert(node.children[0].type.isValue(), "Check", "Non-value type in assignment", node.line);
+        errorAssert(node.children[0].type.isCopyable(), "Check", "Non-copyable type in assignment", node.line);
         break;
     }
 
@@ -1625,11 +1684,14 @@ void checkStmt(ASTNode& node, DefEnv& dEnv)
         break;
 
     case VarDef:
-        assert(node.children.size() == 1);
-        checkValExpr(node.children[0], dEnv);
-        errorAssert(
-            node.children[0].type.convertableTo(node.type),
-            "Check", "RHS type does not match LHS type in variable definition", node.line);
+        assert(node.children.size() <= 1);
+        if (!node.children.empty())
+        {
+            checkValExpr(node.children[0], dEnv);
+            errorAssert(
+                node.children[0].type.convertableTo(node.type),
+                "Check", "RHS type does not match LHS type in variable definition", node.line);
+        }
         break;
 
     default:
@@ -1756,7 +1818,7 @@ DefEnv checkProgram(ASTNode& node)
 }
 
 // return address and base pointer
-const WordT extraFrameSize = 2;
+const WordT extraFrameSize = 2 * sizeof(WordT);
 
 enum InstrKind
 {
@@ -1939,9 +2001,11 @@ struct LocAllocator
         currOffset = -frameSize;
     }
 
-    Location pushVar()
+    Location pushVar(WordT varSize)
     {
-        return {locKind, currOffset++};
+        WordT oldOffset = currOffset;
+        currOffset += varSize;
+        return {locKind, oldOffset};
     }
 
     WordT newLabel()
@@ -1994,7 +2058,7 @@ void compileValExpr(const ASTNode& node, InstrStream& instrStream, CompileEnv& c
     if (node.isAddrExpr())
     {
         compileAddrExpr(node, instrStream, cEnv);
-        if (node.type.isValue()) instrStream.instrs.emplace_back(ILoad);
+        if (node.type.isCopyable()) instrStream.instrs.emplace_back(ILoad);
         return;
     }
 
@@ -2057,7 +2121,7 @@ void compileVarDef(const ASTNode& node, InstrStream& instrStream, CompileEnv& cE
 {
     assert(node.kind == VarDef && node.isComplete());
 
-    cEnv.locator.setLoc(node.def, cEnv.locAllocator.pushVar());
+    cEnv.locator.setLoc(node.def, cEnv.locAllocator.pushVar(node.type.typeSize()));
 }
 
 void compileStmt(const ASTNode& node, InstrStream& instrStream, CompileEnv& cEnv)
@@ -2131,11 +2195,14 @@ void compileStmt(const ASTNode& node, InstrStream& instrStream, CompileEnv& cEnv
 
     case VarDef:
     {
-        assert(node.children.size() == 1);
+        assert(node.children.size() <= 1);
         const Location& loc = cEnv.locator.getLoc(node.def);
-        instrStream.instrs.emplace_back(std::move(loc.getAddrInstr()));
-        compileValExpr(node.children[0], instrStream, cEnv);
-        instrStream.instrs.emplace_back(IStore);
+        if (!node.children.empty())
+        {
+            instrStream.instrs.emplace_back(std::move(loc.getAddrInstr()));
+            compileValExpr(node.children[0], instrStream, cEnv);
+            instrStream.instrs.emplace_back(IStore);
+        }
         break;
     }
 
@@ -2177,7 +2244,7 @@ void compileParams(const ASTNode& node, InstrStream& instrStream, CompileEnv& cE
 
     for (size_t i = 0; i < node.params.size(); ++i)
     {
-        cEnv.locator.setLoc(node.params[i].def, cEnv.locAllocator.pushVar());
+        cEnv.locator.setLoc(node.params[i].def, cEnv.locAllocator.pushVar(node.params[i].type.typeSize()));
     }
 }
 
@@ -2186,10 +2253,16 @@ void compileFunDef(const ASTNode& node, InstrStream& instrStream, CompileEnv& cE
     assert(node.kind == FunDef && node.isComplete());
     assert(node.children.size() == 1);
 
+    WordT frameSize = extraFrameSize;
+    for (size_t i = 0; i < node.params.size(); ++i)
+    {
+        frameSize += node.params[i].type.typeSize();
+    }
+
     compileFunSetLabel(node, instrStream, cEnv);
-    cEnv.locAllocator.setFrame(LocLocal, node.params.size() + extraFrameSize);
+    cEnv.locAllocator.setFrame(LocLocal, frameSize);
     compileParams(node, instrStream, cEnv);
-    for (int i = 0; i < extraFrameSize; ++i) cEnv.locAllocator.pushVar();
+    cEnv.locAllocator.pushVar(extraFrameSize);
     size_t iSpAddAddr = instrStream.instrs.size();
     instrStream.instrs.emplace_back(ISpAdd, 0);
     compileBody(node.children[0], instrStream, cEnv);
@@ -2202,6 +2275,8 @@ void compileIntrDef(const ASTNode& node, InstrStream& instrStream, CompileEnv& c
 {
     assert(node.kind == IntrDef && node.isComplete());
 
+    WordT largeFrameSize = TypeNode(Int64T).typeSize() + extraFrameSize;
+
     compileFunSetLabel(node, instrStream, cEnv);
     if (node.name == "nullptr")
     {
@@ -2210,18 +2285,18 @@ void compileIntrDef(const ASTNode& node, InstrStream& instrStream, CompileEnv& c
     }
     else if (node.name == "alloc")
     {
-        instrStream.instrs.emplace_back(ILocal, -(extraFrameSize + 1));
+        instrStream.instrs.emplace_back(ILocal, -largeFrameSize);
         instrStream.instrs.emplace_back(ILoad);
         instrStream.instrs.emplace_back(IAlloc);
-        instrStream.instrs.emplace_back(IReturn, extraFrameSize + 1);
+        instrStream.instrs.emplace_back(IReturn, largeFrameSize);
     }
     else if (node.name == "free")
     {
-        instrStream.instrs.emplace_back(ILocal, -(extraFrameSize + 1));
+        instrStream.instrs.emplace_back(ILocal, -largeFrameSize);
         instrStream.instrs.emplace_back(ILoad);
         instrStream.instrs.emplace_back(IFree);
         instrStream.instrs.emplace_back(IPush, 0);
-        instrStream.instrs.emplace_back(IReturn, extraFrameSize + 1);
+        instrStream.instrs.emplace_back(IReturn, largeFrameSize);
     }
     else if (node.name == "read")
     {
@@ -2230,11 +2305,11 @@ void compileIntrDef(const ASTNode& node, InstrStream& instrStream, CompileEnv& c
     }
     else if (node.name == "print")
     {
-        instrStream.instrs.emplace_back(ILocal, -(extraFrameSize + 1));
+        instrStream.instrs.emplace_back(ILocal, -largeFrameSize);
         instrStream.instrs.emplace_back(ILoad);
         instrStream.instrs.emplace_back(IPrint);
         instrStream.instrs.emplace_back(IPush, 0);
-        instrStream.instrs.emplace_back(IReturn, extraFrameSize + 1);
+        instrStream.instrs.emplace_back(IReturn, largeFrameSize);
     }
     else if (node.name == "flush")
     {
@@ -2244,11 +2319,11 @@ void compileIntrDef(const ASTNode& node, InstrStream& instrStream, CompileEnv& c
     }
     else if (node.name == "exit")
     {
-        instrStream.instrs.emplace_back(ILocal, -(extraFrameSize + 1));
+        instrStream.instrs.emplace_back(ILocal, -largeFrameSize);
         instrStream.instrs.emplace_back(ILoad);
         instrStream.instrs.emplace_back(IExit);
         instrStream.instrs.emplace_back(IPush, 0);
-        instrStream.instrs.emplace_back(IReturn, extraFrameSize + 1);
+        instrStream.instrs.emplace_back(IReturn, largeFrameSize);
     }
     else assert(false);
 }
@@ -2347,7 +2422,7 @@ WordT executeProgram(const InstrStream& instrStream, std::istream& in, std::ostr
             break;
 
         case ISpAdd:
-            sp += instr.arg;
+            sp += instr.arg / sizeof(WordT);
             break;
 
         case IBinOp:
@@ -2462,11 +2537,11 @@ WordT executeProgram(const InstrStream& instrStream, std::istream& in, std::ostr
         }
 
         case IGlobal:
-            *sp++ = reinterpret_cast<WordT>(gp + instr.arg);
+            *sp++ = reinterpret_cast<WordT>(gp + instr.arg / sizeof(WordT));
             break;
 
         case ILocal:
-            *sp++ = reinterpret_cast<WordT>(bp + instr.arg);
+            *sp++ = reinterpret_cast<WordT>(bp + instr.arg / sizeof(WordT));
             break;
 
         case ILoad:
@@ -2522,7 +2597,7 @@ WordT executeProgram(const InstrStream& instrStream, std::istream& in, std::ostr
             WordT* oldBp = reinterpret_cast<WordT*>(bp);
             pc = reinterpret_cast<const Instr*>(oldBp[-2]);
             bp = reinterpret_cast<WordT*>(oldBp[-1]);
-            sp = oldBp - instr.arg;
+            sp = oldBp - instr.arg / sizeof(WordT);
             *sp++ = val;
             break;
         }

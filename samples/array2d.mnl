@@ -1,0 +1,31 @@
+fun int(int*, int, int) iota(ptr, n, val) =
+    var int i = 0;
+    while i < n do
+        ptr[i] = val + i;
+        i = i + 1;
+    end
+end
+
+fun int(int[5]*, int) pattern(ptr, n) =
+    var int i = 0;
+    while i < n do
+        var int left = i % 5;
+        iota(&ptr[i][left], 5 - left, 1);
+        iota(&ptr[i][0], left, 5 - left + 1);
+        i = i + 1;
+    end
+end
+
+fun int() main() =
+    var int[5][12] xs;
+    pattern(&xs[0], 12);
+    var int i = 0;
+    while i < 12 do
+        var int j = 0;
+        while j < 5 do
+            print(xs[i][j]);
+            j = j + 1;
+        end
+        i = i + 1;
+    end
+end

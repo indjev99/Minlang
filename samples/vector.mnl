@@ -1,89 +1,80 @@
-# A vector is a dynamic array, represented by a pointer to a tripe (data, size, capacity)
-# Tuples or custom types are not yet supported, so we say it is an int*
+# A vector is a resizable dynamic array, represented by a pointer to a triple (data, size, capacity)
 
-fun int*() vecNew() =
-    var int* vec = alloc(3);
-    vec[0] = 0;
-    vec[1] = 0;
-    vec[2] = 0;
+fun (int*, int, int)*() vecNew() =
+    var (int*, int, int)* vec = alloc(3);
+    (*vec)[0] = nullptr();
+    (*vec)[1] = 0;
+    (*vec)[2] = 0;
     return vec;
 end
 
-# There is no cast syntax so we convert through a wildcardPtr
-fun int**(wildcardPtr) toIntPtrPtr(ptr) =
-    return ptr;
-end
-
-fun int(int*) vecDelete(vec) =
-    free(toIntPtrPtr(vec)[0]);
+fun int((int*, int, int)*) vecDelete(vec) =
+    free((*vec)[0]);
     free(vec);
 end
 
-fun int(int*, int) vecSetCapacity(vec, newCapacity) =
-    var int** _vec = toIntPtrPtr(vec);
-    if newCapacity < vec[1] then
-        exit(-1);
+fun int((int*, int, int)*, int) vecSetCapacity(vec, newCapacity) =
+    if newCapacity < (*vec)[1] then
+        exit(1);
     end
-    vec[2] = newCapacity;
+    (*vec)[2] = newCapacity;
     var int* newData = alloc(newCapacity);
     var int i = 0;
-    while i < vec[1] do
-        newData[i] = _vec[0][i];
+    while i < (*vec)[1] do
+        newData[i] = (*vec)[0][i];
         i = i + 1;
     end
-    free(_vec[0]);
-    _vec[0] = newData;
+    free((*vec)[0]);
+    (*vec)[0] = newData;
 end
 
-fun int(int*) vecExpand(vec) =
-    var int newCapacity = vec[2] * 2;
+fun int((int*, int, int)*) vecExpand(vec) =
+    var int newCapacity = (*vec)[2] * 2;
     if newCapacity == 0 then
         newCapacity = 1;
     end
     vecSetCapacity(vec, newCapacity);
 end
 
-fun int(int*, int) vecResize(vec, newSize) =
-    if newSize > vec[2] then
+fun int((int*, int, int)*, int) vecResize(vec, newSize) =
+    if newSize > (*vec)[2] then
         vecSetCapacity(vec, newSize);
     end
-    vec[1] = newSize;
+    (*vec)[1] = newSize;
 end
 
-fun int(int*, int) vecPush(vec, val) =
-    var int** _vec = toIntPtrPtr(vec);
-    if vec[1] == vec[2] then
+fun int((int*, int, int)*, int) vecPush(vec, val) =
+    if (*vec)[1] == (*vec)[2] then
         vecExpand(vec);
     end
-    _vec[0][vec[1]] = val;
-    vec[1] = vec[1] + 1;
+    (*vec)[0][(*vec)[1]] = val;
+    (*vec)[1] = (*vec)[1] + 1;
 end
 
-fun int(int*) vecPop(vec) =
-    if vec[1] == 0 then
-        exit(-1);
+fun int((int*, int, int)*) vecPop(vec) =
+    if (*vec)[1] == 0 then
+        exit(1);
     end
-    vec[1] = vec[1] - 1;
+    (*vec)[1] = (*vec)[1] - 1;
 end
 
-fun int*(int*, int) vecAt(vec, idx) =
-    var int** _vec = toIntPtrPtr(vec);
-    if idx < 0 || idx >= vec[1] then
-        exit(-1);
+fun int*((int*, int, int)*, int) vecAt(vec, idx) =
+    if idx < 0 || idx >= (*vec)[1] then
+        exit(1);
     end
-    return &_vec[0][idx];
+    return &(*vec)[0][idx];
 end
 
-fun int*(int*) vecData(vec) =
-    return toIntPtrPtr(vec)[0];
+fun int*((int*, int, int)*) vecData(vec) =
+    return (*vec)[0];
 end
 
-fun int(int*) vecSize(vec) =
-    return vec[1];
+fun int((int*, int, int)*) vecSize(vec) =
+    return (*vec)[1];
 end
 
-fun int(int*) vecCapacity(vec) =
-    return vec[2];
+fun int((int*, int, int)*) vecCapacity(vec) =
+    return (*vec)[2];
 end
 
 # Example use case: Adjacency list for graph
@@ -92,7 +83,7 @@ fun int() main() =
     # Input
     var int n = read();
     var int m = read();
-    var int** edges = alloc(n);
+    var (int*, int, int)** edges = alloc(n);
     var int i = 0;
     while i < n do
         edges[i] = vecNew();
@@ -115,7 +106,7 @@ fun int() main() =
     end
 
     # BFS
-    var int* queue = vecNew();
+    var (int*, int, int)* queue = vecNew();
     var int qPos = 0;
     vecPush(queue, 0);
     dists[0] = 0;

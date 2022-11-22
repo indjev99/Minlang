@@ -1,0 +1,7 @@
+fun int() main() =
+    var (int, int) point;
+    point[0] = read();
+    point[1] = read();
+    print(point[0]);
+    print(point[1]);
+end

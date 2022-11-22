@@ -3,8 +3,8 @@ A small strongly typed imperative programming language.
 
 Semantics:
 - All simple types are represented as 64 bit values.
-- Arrays decay to pointers when in an expression (plan is to change that).
 - Function arguments are passed by value and are computed from left to right.
+- Non-primitive types cannot currently be passed (by value), so we pass them by pointer manually.
 
 Lexing:
 - Start single line comments with `#`
@@ -48,16 +48,12 @@ ADDR_EXPR ::=
   | "(" ADDR_EXPR ")"
 
 TYPE ::=
-    VAL_TYPE | FUN_TYPE
-
-VAL_TYPE ::=
     int
   | wildcardPtr
   | TYPE*
   | TYPE [ NUMBER ]
+  | "(" ( TYPE ( , TYPE )* ) ")"
   | TYPE "(" ( TYPE ( , TYPE )* ) ")"
-
-FUN_TYPE ::=
 ```
 
 Subscripting and the oparators have the usual precedences.
@@ -72,8 +68,6 @@ Primive variables and functions:
 - `int(int) exit(code)`
 
 Future plans:
-- Arrays
-- Tuples
 - Imports
 - Custom struct types
 - Named arguments

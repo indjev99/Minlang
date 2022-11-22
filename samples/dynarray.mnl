@@ -1,0 +1,43 @@
+# Represent a dynamic array (no insertions or deletions) by a pointer to a pair of (size, data)
+
+fun (int, int*)*(int) arrMake(n) =
+    var (int, int*)* arr = alloc(2);
+    (*arr)[0] = n;
+    (*arr)[1] = alloc(n);
+    return arr;
+end
+
+fun int((int, int*)*) arrFree(arr) =
+    free((*arr)[1]);
+    free(arr);
+end
+
+fun int((int, int*)*) arrSize(arr) =
+    return (*arr)[0];
+end
+
+fun int*((int, int*)*) arrData(arr) =
+    return (*arr)[1];
+end
+
+fun int*((int, int*)*, int) arrAt(arr, i) =
+    if i < 0 || i >= arrSize(arr) then
+        exit(1);
+    end
+    return &arrData(arr)[i];
+end
+
+fun int() main() =
+    var int n = read();
+    var (int, int*)* arr = arrMake(n);
+    var int i = 0;
+    while i < n do
+        *arrAt(arr, i) = read();
+        i = i + 1;
+    end
+    var int i = 0;
+    while i < n do
+        print(*arrAt(arr, i));
+        i = i + 1;
+    end
+end

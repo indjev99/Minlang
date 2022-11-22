@@ -396,6 +396,7 @@ enum TypeKind
     WildcardPtrT,
     PointerT,
     ArrayT,
+    TupleT,
     FunctionT,
     CustomT
 };
@@ -469,32 +470,27 @@ struct TypeNode
         return kind == Int64T;
     }
 
-    bool isDereferenceable() const
+    bool isValuePtr() const
     {
-        return kind == PointerT || kind == ArrayT;
-    }
-
-    bool isCopyable() const
-    {
-        return kind != FunctionT && kind != ArrayT;
+        return kind == PointerT && children[0].isValue();
     }
 
     bool isSubscriptable() const
     {
-        return isDereferenceable() && children[0].isValue();
+        return ((kind == PointerT || kind == ArrayT) && children[0].isValue()) || kind == TupleT;
     }
 
-    bool topMatch(const TypeNode& other) const
+    bool isCopyable() const
     {
-        if (kind != other.kind) return false;
-        if (kind == CustomT && name != other.name) return false;
-        if (children.size() != other.children.size()) return false;
-        return true;
+        return kind != FunctionT && kind != ArrayT && kind != TupleT;
     }
 
     bool structMatch(const TypeNode& other) const
     {
-        if (!topMatch(other)) return false;
+        if (kind != other.kind) return false;
+        if (kind == CustomT && name != other.name) return false;
+        if (kind == ArrayT && arrLen != other.arrLen) return false;
+        if (children.size() != other.children.size()) return false;
         for (size_t i = 0; i < children.size(); ++i)
         {
             if (!children[i].structMatch(other.children[i])) return false;
@@ -507,13 +503,7 @@ struct TypeNode
         if ((kind == PointerT && other.kind == WildcardPtrT) ||
             (kind == WildcardPtrT && other.kind == PointerT))
             return true;
-        bool surfaceMatch = topMatch(other) ||!(kind == PointerT && other.kind == ArrayT);
-        if (!surfaceMatch) return false;
-        for (size_t i = 0; i < children.size(); ++i)
-        {
-            if (!children[i].structMatch(other.children[i])) return false;
-        }
-        return true;
+        return structMatch(other);
     }
 
     bool isComplete() const
@@ -521,16 +511,39 @@ struct TypeNode
         return kind != DummyT && remaining == 0;
     }
 
+    WordT elemOffset(size_t idx) const
+    {
+        assert(kind == TupleT);
+        assert(idx >= 0 && idx < children.size());
+        WordT offset = 0;
+        for (size_t i = 0; i < idx; ++i)
+        {   
+            offset += children[i].typeSize();
+        }
+        return offset;
+    }
+
     WordT typeSize() const
     {
         switch (kind)
         {
         case Int64T:
+        case WildcardPtrT:
         case PointerT:
             return sizeof(WordT);
 
         case ArrayT:
             return arrLen * children[0].typeSize();
+
+        case TupleT:
+        {
+            WordT size = 0;
+            for (size_t i = 0; i < children.size(); ++i)
+            {   
+                 size += children[i].typeSize();
+            }
+            return size;
+        }
 
         default:
             assert(false);
@@ -570,6 +583,16 @@ struct TypeNode
             out << "[";
             if (children[0].isComplete()) out << arrLen;
             out << "]";
+            break;
+
+        case TupleT:
+            out << "(";
+            for (size_t i = 0; i < children.size(); ++i)
+            {
+                if (i > 0) out << ", ";
+                children[i].print(out);
+            }
+            out << ")";
             break;
 
         case FunctionT:
@@ -798,8 +821,10 @@ struct ASTNode
         case AddrOfOp:
         case DerefOp:
         case UnOperator:
+            out << "(";
             out << operatorStrings.at(oper);
             if (children.size() > 0) children[0].print(out, indent + 1);
+            out << ")";
             break;
 
         case FunCall:
@@ -907,8 +932,12 @@ struct ASTNode
             printIndent(out, indent);
             out << "var ";
             type.print(out);
-            out << " " << name << " = ";
-            if (children.size() > 0) children[0].print(out, indent + 1);
+            out << " " << name;
+            if (children.size() > 0)
+            {
+                out << " = ";
+                children[0].print(out, indent + 1);
+            }
             out << ";" << "\n";
             break;
 
@@ -1109,12 +1138,18 @@ ASTNode parseProgram(const TokenStream& tokenStream)
 
                 case LBrack:
                 {
-                    errorAssert(lastT.isComplete(), "Parse", "Unexpected opening bracket in type", line);
-                    TypeNode outType = std::move(lastT);
-                    typeStack.pop_back();
-                    typeStack.emplace_back(FunctionT, -1);
-                    TypeNode& lastT = typeStack.back();
-                    lastT.addChild(std::move(outType));
+                    if (!lastT.isComplete())
+                    {
+                        typeStack.emplace_back(TupleT, -1);
+                    }
+                    else
+                    {
+                        TypeNode outType = std::move(lastT);
+                        typeStack.pop_back();
+                        typeStack.emplace_back(FunctionT, -1);
+                        TypeNode& lastT = typeStack.back();
+                        lastT.addChild(std::move(outType));
+                    }
                     break;
                 }
 
@@ -1176,11 +1211,7 @@ ASTNode parseProgram(const TokenStream& tokenStream)
             case DefParamSep:
                 errorAssert(token.kind == Comma || token.kind == RBrack, "Parse", "Expected comma or closing bracket in defition", line);
                 if (token.kind == Comma) defState = DefParam;
-                else if (token.kind == RBrack)
-                {
-                    defState = DefAssign;
-                    errorAssert(last.type.children.size() == last.params.size() + 1, "Parse", "Unexpected number of parameters in function definition", line);
-                }
+                else if (token.kind == RBrack) defState = DefAssign;
                 break;
 
             case DefAssign:
@@ -1504,20 +1535,65 @@ void checkAddrExpr(ASTNode& node, DefEnv& dEnv)
         errorAssert(node.children[0].type.isSubscriptable(), "Check", "Subscripting non-subsriptable type", node.line);
         checkValExpr(node.children[1], dEnv);
         errorAssert(node.children[1].type.isIntegral(), "Check", "Subscripting with non-integral type", node.line);
-        assert(node.children[0].type.children.size() == 1);
-        node.kind = BinOperator;
-        node.oper = ArAdd;
-        ASTNode derefNode(DerefOp, Deref, 1, node.line);
-        derefNode.addExpr(std::move(node));
-        node = std::move(derefNode);
-        checkValExpr(node, dEnv);
+        switch (node.children[0].type.kind)
+        {
+        case ArrayT:
+        {
+            assert(node.children[0].type.children.size() == 1);
+            ASTNode addrNode(AddrOfOp, AddrOf, 1, node.line);
+            addrNode.addExpr(std::move(node.children[0]));
+            addrNode.type = addrNode.children[0].type;
+            addrNode.type.kind = PointerT;
+            addrNode.checkDone = true;
+            node.children[0] = std::move(addrNode);
+        }
+
+        case PointerT:
+        {
+            assert(node.children[0].type.children.size() == 1);
+            node.kind = BinOperator;
+            node.oper = ArAdd;
+            ASTNode derefNode(DerefOp, Deref, 1, node.line);
+            derefNode.addExpr(std::move(node));
+            node = std::move(derefNode);
+            checkValExpr(node, dEnv);
+            break;
+        }
+
+        case TupleT:
+        {
+            errorAssert(node.children[1].kind == ConstNumber, "Check", "Subscripting tuple with non-constant subscript", node.line);
+            WordT idx = node.children[1].number;
+            errorAssert(idx >= 0 && idx < (WordT) node.children[0].type.children.size(), "Check", "Subscripting tuple with an out of bounds subscript", node.line);
+            WordT offset = node.children[0].type.elemOffset(idx);
+            TypeNode type = node.children[0].type.children[idx];
+            ASTNode addrNode(AddrOfOp, AddrOf, 1, node.line);
+            addrNode.addExpr(std::move(node.children[0]));
+            addrNode.type = TypeNode(PointerT, {type});
+            addrNode.checkDone = true;
+            node.children[0] = std::move(addrNode);
+            node.kind = BinOperator;
+            node.oper = ArAdd;
+            node.children[1].number = offset;
+            node.type = node.children[0].type;
+            node.checkDone = true;
+            ASTNode derefNode(DerefOp, Deref, 1, node.line);
+            derefNode.addExpr(std::move(node));
+            node = std::move(derefNode);
+            checkValExpr(node, dEnv);
+            break;
+        }
+
+        default:
+            assert(false);
+        }
         break;
     }
 
     case DerefOp:
         assert(node.children.size() == 1);
         checkValExpr(node.children[0], dEnv);
-        errorAssert(node.children[0].type.isDereferenceable(), "Check", "Dereferencing non-dereferenceable type", node.line);
+        errorAssert(node.children[0].type.kind == PointerT, "Check", "Dereferencing non-pointer type", node.line);
         assert(node.children[0].type.children.size() == 1);
         node.type = node.children[0].type.children[0];
         break;
@@ -1525,6 +1601,8 @@ void checkAddrExpr(ASTNode& node, DefEnv& dEnv)
     default:
         errorAssert(false, "Check", "Unknown node kind", node.line);
     }
+
+    node.checkDone = true;
 }
 
 void checkValExpr(ASTNode& node, DefEnv& dEnv)
@@ -1550,12 +1628,12 @@ void checkValExpr(ASTNode& node, DefEnv& dEnv)
         assert(node.children.size() == 2);
         checkValExpr(node.children[0], dEnv);
         checkValExpr(node.children[1], dEnv);
-        if ((node.oper == ArAdd || node.oper == ArSub) && (node.children[0].type.isSubscriptable() || node.children[1].type.isSubscriptable()))
+        if ((node.oper == ArAdd || node.oper == ArSub) && (node.children[0].type.isValuePtr() || node.children[1].type.isValuePtr()))
         {
             errorAssert(
                 node.children[0].type.isIntegral() || node.children[1].type.isIntegral(),
                 "Check", "Invalid operand type in binary operator", node.line);
-            if (node.children[1].type.isSubscriptable()) std::swap(node.children[0], node.children[1]);
+            if (node.children[1].type.isValuePtr()) std::swap(node.children[0], node.children[1]);
             ASTNode mulNode(BinOperator, ArMul, 2, node.line);
             mulNode.addExpr(std::move(node.children[1]));
             ASTNode valNode(ConstNumber, node.children[0].type.children[0].typeSize(), 0, node.line);
@@ -1602,7 +1680,12 @@ void checkValExpr(ASTNode& node, DefEnv& dEnv)
             errorAssert(
                 node.children[i].type.isConvertableTo(funType.children[i]),
                 "Check", "Argument type does not match parameter type in function call", node.line);
-        }   
+        }
+        ASTNode addrNode(AddrOfOp, AddrOf, 1, node.line);
+        addrNode.addExpr(std::move(node.children[0]));
+        addrNode.type = TypeNode(PointerT, {addrNode.children[0].type});
+        addrNode.checkDone = true;
+        node.children[0] = std::move(addrNode);
         break;
     }
 
@@ -1615,6 +1698,8 @@ void checkValExpr(ASTNode& node, DefEnv& dEnv)
 
 void checkTypeRec(const TypeNode& node, DefEnv& dEnv, int line)
 {
+    assert(node.isComplete());
+
     switch (node.kind)
     {
     case DummyT:
@@ -1628,25 +1713,34 @@ void checkTypeRec(const TypeNode& node, DefEnv& dEnv, int line)
 
     case ArrayT:
         assert(node.children.size() == 1);
-        errorAssert(node.children[0].isValue(), "Check", "Array type is not a value", line);
+        errorAssert(node.children[0].isValue(), "Check", "Array element type is not a value", line);
         errorAssert(node.arrLen >= 0, "Check", "Array length is negative", line);
         checkTypeRec(node.children[0], dEnv, line);
         break;
 
-    case FunctionT:
-        assert(node.children.size() >= 1);
-        errorAssert(node.children[0].isValue(), "Check", "Return type is not a value", line);
-        errorAssert(node.children[0].isCopyable(), "Check", "Return type is not copyable", line);
+    case TupleT:
         for (size_t i = 0; i < node.children.size(); ++i)
         {
-            errorAssert(node.children[i].isValue(), "Check", "Parameter type is not a value", line);
-            errorAssert(node.children[i].isCopyable(), "Check", "Parameter type is not copyable", line);    
+            errorAssert(node.children[i].isValue(), "Check", "Tuple element type is not a value", line);
+            checkTypeRec(node.children[i], dEnv, line);
+        }
+        break;
+
+    case FunctionT:
+        assert(node.children.size() >= 1);
+        errorAssert(node.children[0].isValue(), "Check", "Function return type is not a value", line);
+        errorAssert(node.children[0].isCopyable(), "Check", "Function return type is not copyable", line);
+        for (size_t i = 1; i < node.children.size(); ++i)
+        {
+            errorAssert(node.children[i].isValue(), "Check", "Function parameter type is not a value", line);
+            errorAssert(node.children[i].isCopyable(), "Check", "Function parameter type is not copyable", line);
+            checkTypeRec(node.children[i], dEnv, line);
         }
         break;
 
     case CustomT:
         assert(node.children.size() == 0);
-        errorAssert(true, "Check", "Custom types not yet supported", line);
+        errorAssert(false, "Check", "Custom types not yet supported", line);
         break;
 
     default:
@@ -1658,10 +1752,13 @@ void checkDefType(ASTNode& node, DefEnv& dEnv, bool assertUnique)
 {
     assert(node.isDef() && node.isComplete());
 
-    if (node.kind == VarDef)
-        errorAssert(node.type.isValue(), "Check", "Expected value type in variable definition", node.line);
-    else if (node.kind == FunDef || node.kind == IntrDef)
-        errorAssert(node.type.isFunction(), "Check", "Expected function type in fuction definition", node.line);
+    if (node.kind == VarDef) errorAssert(node.type.isValue(), "Check", "Type in variable definition is not a value type", node.line);
+    else if (node.kind == FunDef)
+    {
+        errorAssert(node.type.isFunction(), "Check", "Type in function definition is not a function type", node.line);
+        errorAssert(node.type.children.size() == node.params.size() + 1, "Parse", "Number of parameters in function definition does not match its type", node.line);
+    }
+    else if (node.kind == IntrDef) assert(node.type.isFunction());
     else assert(false);
 
     checkTypeRec(node.type, dEnv, node.line);
@@ -2097,11 +2194,12 @@ void compileAddrExpr(const ASTNode& node, InstrStream& instrStream, CompileEnv& 
 void compileValExpr(const ASTNode& node, InstrStream& instrStream, CompileEnv& cEnv)
 {
     assert(node.isExpr() && node.isComplete());
+    assert(node.type.isCopyable());
 
     if (node.isAddrExpr())
     {
         compileAddrExpr(node, instrStream, cEnv);
-        if (node.type.isCopyable()) instrStream.instrs.emplace_back(ILoad);
+        instrStream.instrs.emplace_back(ILoad);
         return;
     }
 
